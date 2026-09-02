@@ -1,0 +1,250 @@
+name: Build Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-release:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ============================================================
+      # 1. 拉取源码
+      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. 自动寻找并解压源码 ZIP
+      # ============================================================
+      - name: Unzip source ZIP
+        shell: bash
+跑: |
+set-e
+
+echo"=====资料库文件====="
+查找。-最大深度2-type f|排序|标头-200
+
+zip_FILE=$(find. -maxdepth1-type f-name"*.zip"|head-1)
+
+如果[-z"$ZIP_FILE"]；则
+echo"错误：在资源库根目录中找不到源ZIP。"
+出口1
+Fi
+
+echo"使用源ZIP：$ZIP_FILE"
+
+mkdir-p源
+          unzip -o "$ZIP_FILE" -d source
+
+echo"=====解压缩的文件====="
+查找源-max深度3-type f|排序|标头-200
+
+      #============================================================
+      #3.自动寻找安卓工程根目录
+      #============================================================
+      - 姓名: 检测Android项目
+壳: 猛击
+跑: |
+set-e
+
+          ROOT=""
+
+          if [ -f "source/gradlew" ]; then
+            ROOT="source"
+          else
+            ROOT=$(find source -name "settings.gradle" -o -name "settings.gradle.kts" \
+              | head -1 \
+              | xargs -r dirname)
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo "ERROR: Cannot find Android Gradle project."
+            find source -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+          echo "Detected project root:"
+          echo "$ROOT"
+
+      # ============================================================
+      # 4. JDK 17
+      # ============================================================
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ============================================================
+      # 5. Android SDK
+      # ============================================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      # ============================================================
+      # 6. Gradle 8.9
+      # ============================================================
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # ============================================================
+      # 7. 检查 / 修复 Gradle Wrapper
+      # ============================================================
+      - name: Prepare Gradle
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -f "./gradlew" ]; then
+            echo "gradlew not found, generating wrapper..."
+            gradle wrapper --gradle-version 8.9
+          fi
+
+          chmod +x ./gradlew
+
+          echo "===== Gradle version ====="
+          ./gradlew --version
+
+      # ============================================================
+      # 8. 检查工程
+      # ============================================================
+      - name: Check Android project
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== Gradle tasks ====="
+          ./gradlew tasks --all --no-daemon
+
+      # ============================================================
+      # 9. 构建正式版 APK
+      # ============================================================
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        env:
+          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
+        run: |
+          set -e
+
+          echo "===== Building Release APK ====="
+
+          ./gradlew \
+            clean \
+            assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --info
+
+      # ============================================================
+      # 10. 查找正式版 APK
+      # ============================================================
+      - name: Locate Release APK
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== APK files ====="
+
+          find . \
+            -type f \
+            \( -name "*.apk" -o -name "*.aab" \) \
+            -print
+
+          APK=$(find . -type f -name "*.apk" \
+            | grep -E "release.*\.apk$|.*-release\.apk$" \
+            | head -1)
+
+||true)
+            echo "ERROR: Release APK not found."
+            exit 1
+          fi
+
+          echo "RELEASE_APK=$APK" >> "$GITHUB_ENV"
+
+          echo "Release APK:"
+          echo "$APK"
+
+      # ============================================================
+保留天数：14# 11. 准备最终安装包
+      # ============================================================
+      - name: Prepare APK artifact
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+
+          VERSION_NAME=$(grep -R \
+            'versionName' \
+            app/build.gradle \
+            app/build.gradle.kts \
+            2>/dev/null \
+            | head -1 \
+            | sed -E 's/.*versionName[[:space:]]*[=:][[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' \
+            || true)
+
+姓名
+version_NAME="释放"
+          fi
+
+final_APK="${GITHUB_WORKSPACE}/工件/彩析自动点击-v${VERSION_NAME}-正式版.安装包"
+
+CP"$RELEASE_APK" "$FINAL_APK"
+
+回声"=====最终安装包==="
+LS-lh"$FINAL_APK"
+
+      #============================================================
+      #12.上传正式版APK
+      #============================================================
+-- 保留天数姓名Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: caifenxi-release-apk
+          path: artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # 13. 上传构建报告
+      # ============================================================
+      - name: Upload build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caifenxi-release-build-reports
+          path: |
+            ${{env.PROJECT_ROOT}}/app/build/reports/**
+            ${{env.PROJECT_ROOT}}/app/build/outputs/**
+          if-no-files-found: warn
+保留天数：14
