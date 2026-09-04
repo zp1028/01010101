@@ -1,0 +1,70 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip source
+        run: |
+          set -e
+          ARCHIVE=$(ls *.zip *.tar.gz 2>/dev/null | head -1)
+          if [ -z "$ARCHIVE" ]; then
+            echo "No archive found"
+            ls -la
+            exit 1
+          fi
+          echo "ARCHIVE=$ARCHIVE"
+          case "$ARCHIVE" in
+            *.zip) unzip -o "$ARCHIVE" ;;
+            *.tar.gz) tar -xzf "$ARCHIVE" ;;
+          esac
+
+      - name: Find project root
+        run: |
+          ROOT=$(find . -maxdepth 3 -name settings.gradle.kts | head -1 | xargs dirname)
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Root: $ROOT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build Debug APK
+        run: |
+          set -e
+          cd "$PROJECT_ROOT"
+          gradle --no-daemon clean assembleDebug --stacktrace
+          APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -1)
+          test -n "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: caifenxi-debug-apk
+          path: artifacts/app-debug.apk
