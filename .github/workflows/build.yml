@@ -37,56 +37,295 @@ jobs:
           fi
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
           echo "Project root: $ROOT"
-          ls -la "$ROOT"
 
       - name: Fix corrupted source files
         run: |
           set -e
           cd "$PROJECT_ROOT"
           
-          echo "=== Fixing corrupted Kotlin files ==="
+          echo "=== Rewriting corrupted Kotlin files ==="
           
-          # Fix 1: MoreScreen.kt - FontWeight.Bol 截断修复
-          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt ]; then
-            sed -i 's/FontWeight\.Bol)/FontWeight.Bold)/g' app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt
-            sed -i 's/FontWeight\.Bol$/FontWeight.Bold)/g' app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt
-            echo "✓ Fixed MoreScreen.kt FontWeight"
-          fi
+          # 用 Python 重写 MoreScreen.kt
+          python3 << 'PYEOF'
+          import os
           
-          # Fix 2: ExecutorControlScreen.kt - 删除末尾多余的 } }
-          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt ]; then
-            # 如果最后两行是 '} }' 和 '}'，修复为单个 '}'
-            tail -5 app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt
-            sed -i ':a;N;$!ba;s/}\s*}\s*}\s*$/}\n}/' app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt
-            echo "✓ Fixed ExecutorControlScreen.kt braces"
-          fi
+          more_screen = '''package com.caifenxi.app.ui.screens
+
+import android.content.pm.PackageManager
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
+import com.caifenxi.app.ui.MainViewModel
+import com.caifenxi.app.ui.components.CaptionMuted
+import com.caifenxi.app.ui.components.GlobalCard
+import com.caifenxi.app.ui.components.SectionTitle
+import com.caifenxi.app.ui.theme.CaiTokens
+
+@Composable
+fun MoreScreen(vm: MainViewModel, navController: NavHostController) {
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = CaiTokens.ScreenHPadding, vertical = CaiTokens.S16)
+    ) {
+        Text("更多", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(CaiTokens.S16))
+        SectionTitle("数据与工具")
+        GlobalCard {
+            listOf(
+                "stats" to "历史战绩",
+                "lab" to "实验室",
+                "accessibility" to "无障碍跟投",
+                "web_executor" to "内置网页执行",
+                "executor_control" to "执行器控制",
+                "executor_logs" to "执行日志",
+                "settings" to "设置 / 悬浮窗"
+            ).forEach { (route, title) ->
+                TextButton(
+                    onClick = { navController.navigate(route) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(title) }
+            }
+        }
+        Spacer(Modifier.height(CaiTokens.S12))
+        GlobalCard {
+            val ctx = LocalContext.current
+            val version = remember {
+                try {
+                    val pm = ctx.packageManager
+                    val info = pm.getPackageInfo(ctx.packageName, 0)
+                    val vName = info.versionName ?: ""
+                    val vCode = if (android.os.Build.VERSION.SDK_INT >= 28)
+                        info.longVersionCode else info.versionCode.toLong()
+                    "v$vName ($vCode)"
+                } catch (_: PackageManager.NameNotFoundException) {
+                    ""
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("彩析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                CaptionMuted(version)
+            }
+            Spacer(Modifier.height(CaiTokens.S8))
+            Text(
+                "走势统计、计划回测、预测共识与跟投记录工具。仅供开奖数据统计与研究，非中奖保证，请理性对待。",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+'''
           
-          # Fix 3: ExecutorLogScreen.kt - 删除垃圾残留内容
-          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt ]; then
-            # 检查并修复第92行附近的垃圾内容
-            grep -n "}        )" app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt && \
-            sed -i 's/}        )/}/g' app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt || true
-            echo "✓ Fixed ExecutorLogScreen.kt garbage"
-          fi
+          path = "app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt"
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+          with open(path, 'w') as f:
+              f.write(more_screen)
+          print(f"✓ Rewrote {path}")
           
-          # Fix 4: WebExecutorScreen.kt - 如果文件过长(>240行)，截断到正确长度
-          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt ]; then
-            LINE_COUNT=$(wc -l < app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt)
-            if [ "$LINE_COUNT" -gt 300 ]; then
-              echo "  WebExecutorScreen.kt has $LINE_COUNT lines, truncating to 240..."
-              head -n 240 app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt > /tmp/WebExecutorScreen_fixed.kt
-              # 确保最后一行是正确的 '}'
-              tail -1 /tmp/WebExecutorScreen_fixed.kt | grep -q "^}$" || echo "}" >> /tmp/WebExecutorScreen_fixed.kt
-              mv /tmp/WebExecutorScreen_fixed.kt app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt
-              echo "✓ Fixed WebExecutorScreen.kt length"
-            fi
-          fi
+          # 重写 ExecutorControlScreen.kt
+          exec_control = '''package com.caifenxi.app.ui.screens
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.caifenxi.app.ui.ExecutorViewModel
+import com.caifenxi.app.ui.components.GlobalCard
+import com.caifenxi.app.ui.components.PrimaryButton
+import com.caifenxi.app.ui.theme.CaiTokens
+
+@Composable
+fun ExecutorControlScreen(vm: ExecutorViewModel = viewModel()) {
+    val executorStatus by vm.executorStatus.collectAsState()
+    val currentTask by vm.currentTask.collectAsState()
+    val executorStats by vm.executorStats.collectAsState()
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = CaiTokens.ScreenHPadding, vertical = CaiTokens.S16)
+    ) {
+        Text("执行器控制中心", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(CaiTokens.S16))
+
+        GlobalCard {
+            Text("执行状态", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(CaiTokens.S8))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("当前状态", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when (executorStatus) {
+                            ExecutorViewModel.ExecutorStatus.IDLE -> "空闲"
+                            ExecutorViewModel.ExecutorStatus.RUNNING -> "运行中"
+                            ExecutorViewModel.ExecutorStatus.COMPLETED -> "已完成"
+                            ExecutorViewModel.ExecutorStatus.FAILED -> "失败"
+                            ExecutorViewModel.ExecutorStatus.CANCELLED -> "已取消"
+                        },
+                        color = when (executorStatus) {
+                            ExecutorViewModel.ExecutorStatus.IDLE -> MaterialTheme.colorScheme.onSurface
+                            ExecutorViewModel.ExecutorStatus.RUNNING -> MaterialTheme.colorScheme.primary
+                            ExecutorViewModel.ExecutorStatus.COMPLETED -> MaterialTheme.colorScheme.secondary
+                            ExecutorViewModel.ExecutorStatus.FAILED -> MaterialTheme.colorScheme.error
+                            ExecutorViewModel.ExecutorStatus.CANCELLED -> MaterialTheme.colorScheme.outline
+                        }
+                    )
+                }
+                Column {
+                    Text("当前任务", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        currentTask?.taskId.takeIf { it?.isNotEmpty() == true } ?: "无",
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(CaiTokens.S16))
+
+        GlobalCard {
+            Text("执行统计", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(CaiTokens.S8))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("总任务数", fontWeight = FontWeight.SemiBold)
+                    Text(executorStats.totalTasks.toString(), fontSize = 24.sp)
+                }
+                Column {
+                    Text("成功任务", fontWeight = FontWeight.SemiBold)
+                    Text(executorStats.successfulTasks.toString(), color = MaterialTheme.colorScheme.secondary)
+                }
+                Column {
+                    Text("失败任务", fontWeight = FontWeight.Bold)
+                    Text(executorStats.failedTasks.toString(), color = MaterialTheme.colorScheme.error)
+                }
+                Column {
+                    Text("成功率", fontWeight = FontWeight.SemiBold)
+                    val successRate = if (executorStats.totalTasks > 0) (executorStats.successfulTasks * 100 / executorStats.totalTasks) else 0
+                    Text("$successRate%", color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(CaiTokens.S16))
+
+        GlobalCard {
+            Text("控制面板", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(CaiTokens.S8))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(CaiTokens.S8)) {
+                PrimaryButton(
+                    text = "开始测试任务",
+                    enabled = executorStatus == ExecutorViewModel.ExecutorStatus.IDLE,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    val testTask = vm.generateTestTask()
+                    vm.startTask(testTask)
+                }
+                PrimaryButton(
+                    text = "停止当前任务",
+                    enabled = executorStatus == ExecutorViewModel.ExecutorStatus.RUNNING,
+                    modifier = Modifier.weight(1f),
+                    ghost = true
+                ) {
+                    currentTask?.taskId?.let { vm.stopTask(it) }
+                }
+                PrimaryButton(
+                    text = "停止所有任务",
+                    enabled = executorStatus != ExecutorViewModel.ExecutorStatus.IDLE,
+                    modifier = Modifier.weight(1f),
+                    ghost = true
+                ) {
+                    vm.stopAllTasks()
+                }
+            }
+            Spacer(Modifier.height(CaiTokens.S8))
+            PrimaryButton(
+                text = "清空日志",
+                enabled = executorStats.totalTasks > 0,
+                modifier = Modifier.fillMaxWidth(),
+                ghost = true
+            ) {
+                vm.clearLogs()
+            }
+        }
+
+        Spacer(Modifier.height(CaiTokens.S16))
+
+        if (currentTask != null) {
+            GlobalCard {
+                Text("当前任务详情", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(CaiTokens.S8))
+                val task = currentTask!!
+                Column {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("任务ID:", fontWeight = FontWeight.SemiBold)
+                        Text(task.taskId)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("彩种:", fontWeight = FontWeight.SemiBold)
+                        Text(task.lotteryKey)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("目标期号:", fontWeight = FontWeight.SemiBold)
+                        Text(task.targetIssue)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("下注类别:", fontWeight = FontWeight.SemiBold)
+                        Text(task.betCommand.category)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("下注方向:", fontWeight = FontWeight.SemiBold)
+                        Text(task.betCommand.direction)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("下注金额:", fontWeight = FontWeight.SemiBold)
+                        Text("${task.betCommand.amount}元")
+                    }
+                }
+            }
+        }
+    }
+}
+'''
           
-          # Fix 5: 创建正确的 local.properties (使用 GitHub Actions 的 Android SDK 路径)
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          echo "✓ Created local.properties with SDK path: $ANDROID_SDK_ROOT"
+          path2 = "app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt"
+          with open(path2, 'w') as f:
+              f.write(exec_control)
+          print(f"✓ Rewrote {path2}")
           
-          echo "=== Fix complete ==="
+          # 修复 ExecutorLogScreen.kt
+          path3 = "app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt"
+          if os.path.exists(path3):
+              with open(path3, 'r') as f:
+                  content = f.read()
+              # 删除垃圾内容
+              content = content.replace('}        )\n}\n}\n}\n}\n', '}\n')
+              with open(path3, 'w') as f:
+                  f.write(content)
+              print(f"✓ Fixed {path3}")
+          
+          # 修复 WebExecutorScreen.kt
+          path4 = "app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt"
+          if os.path.exists(path4):
+              with open(path4, 'r') as f:
+                  lines = f.readlines()
+              if len(lines) > 300:
+                  # 截断到240行并确保正确结束
+                  fixed = lines[:240]
+                  if fixed[-1].strip() != '}':
+                      fixed.append('}\n')
+                  with open(path4, 'w') as f:
+                      f.writelines(fixed)
+                  print(f"✓ Truncated {path4} to 240 lines")
+          
+          print("=== Fix complete ===")
+          PYEOF
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
