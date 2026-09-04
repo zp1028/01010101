@@ -1,62 +1,19 @@
-name: Build Release APK
+name: Build APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-
-permissions:
-  contents: read
 
 jobs:
-  build-release:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Find and unzip source
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No source ZIP found in repository root."
-            exit 1
-          fi
-
-          echo "Using source ZIP: $ZIP_FILE"
-
-          unzip -o "$ZIP_FILE" -d ./source
-
-          echo "Extracted files:"
-          find ./source -maxdepth 2 -type f | head -100
-
-      - name: Detect Android project
-        shell: bash
-        run: |
-          set -e
-
-          PROJECT_ROOT=$(find "$GITHUB_WORKSPACE/source" -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1)
-
-          if [ -z "$PROJECT_ROOT" ]; then
-            echo "ERROR: Cannot find Android Gradle project."
-            exit 1
-          fi
-
-          PROJECT_ROOT=$(dirname "$PROJECT_ROOT")
-
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-
-          echo "Android project root:"
-          echo "$PROJECT_ROOT"
-
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -65,98 +22,30 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
-        shell: bash
+      - name: Install SDK
         run: |
-          set -e
-
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Create Gradle wrapper if missing
-        working-directory: ${{ env.PROJECT_ROOT }}
-        shell: bash
+      - name: Build Debug APK
         run: |
           set -e
-
-          if [ ! -f "./gradlew" ]; then
-            echo "gradlew not found. Generating Gradle wrapper..."
-            gradle wrapper --gradle-version 8.9
-          fi
-
+          sed -i 's/\r$//' ./gradlew || true
           chmod +x ./gradlew
+          rm -rf .gradle
+          ./gradlew --no-daemon clean assembleDebug --stacktrace
+          APK=$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -1)
+          test -n "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
 
-      - name: Restore signing keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          set -e
-
-          echo "$KEYSTORE_BASE64" | base64 --decode > "$GITHUB_WORKSPACE/release.keystore"
-
-          test -s "$GITHUB_WORKSPACE/release.keystore"
-
-          echo "Signing keystore restored."
-
-      - name: Build Release APK
-        working-directory: ${{env.PROJECT_ROOT}}
-        shell: bash
-        env:
-          KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
-        run: |
-          set -e
-
-          ./gradlew clean assembleRelease \
-            --no-daemon \
-            --stacktrace
-
-      - name: Locate APK
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p "$GITHUB_WORKSPACE/release"
-
-          APK=$(find "$PROJECT_ROOT" -type f -name "*.apk" | grep "/release/" | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: Release APK not found."
-            find "$PROJECT_ROOT" -type f -name "*.apk" -print
-            exit 1
-          fi
-
-          echo "Found APK:"
-          echo "$APK"
-
-          cp "$APK" "$GITHUB_WORKSPACE/release/彩析自动点击-v2.3.2-正式版.apk"
-
-          ls -lh "$GITHUB_WORKSPACE/release/"
-
-      - name: Upload Release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: caifenxi-v2.3.2-release
-          path: release/彩析自动点击-v2.3.2-正式版.apk
-          if-no-files-found: error
-
-      - name: Upload Build Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: caifenxi-build-reports
-          path: |
-            ${{env.PROJECT_ROOT}}/app/build/reports/**
-            ${{env.PROJECT_ROOT}}/app/build/outputs/**
-          if-no-files-found: ignore
+          name: caifenxi-debug-apk
+          path: artifacts/app-debug.apk
