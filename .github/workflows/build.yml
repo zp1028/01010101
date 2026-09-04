@@ -42,14 +42,11 @@ jobs:
         run: |
           set -e
           cd "$PROJECT_ROOT"
-          
           echo "=== Rewriting corrupted Kotlin files ==="
-          
-          # 用 Python 重写 MoreScreen.kt
           python3 << 'PYEOF'
-          import os
-          
-          more_screen = '''package com.caifenxi.app.ui.screens
+import os
+
+more_screen = '''package com.caifenxi.app.ui.screens
 
 import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.*
@@ -118,15 +115,14 @@ fun MoreScreen(vm: MainViewModel, navController: NavHostController) {
     }
 }
 '''
-          
-          path = "app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt"
-          os.makedirs(os.path.dirname(path), exist_ok=True)
-          with open(path, 'w') as f:
-              f.write(more_screen)
-          print(f"✓ Rewrote {path}")
-          
-          # 重写 ExecutorControlScreen.kt
-          exec_control = '''package com.caifenxi.app.ui.screens
+
+path = 'app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt'
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'w') as f:
+    f.write(more_screen)
+print(f'Rewrote {path}')
+
+exec_control = '''package com.caifenxi.app.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -208,7 +204,7 @@ fun ExecutorControlScreen(vm: ExecutorViewModel = viewModel()) {
                 Column {
                     Text("成功率", fontWeight = FontWeight.SemiBold)
                     val successRate = if (executorStats.totalTasks > 0) (executorStats.successfulTasks * 100 / executorStats.totalTasks) else 0
-                    Text("$successRate%", color = MaterialTheme.colorScheme.secondary)
+                    Text("${successRate}%", color = MaterialTheme.colorScheme.secondary)
                 }
             }
         }
@@ -293,39 +289,35 @@ fun ExecutorControlScreen(vm: ExecutorViewModel = viewModel()) {
     }
 }
 '''
-          
-          path2 = "app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt"
-          with open(path2, 'w') as f:
-              f.write(exec_control)
-          print(f"✓ Rewrote {path2}")
-          
-          # 修复 ExecutorLogScreen.kt
-          path3 = "app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt"
-          if os.path.exists(path3):
-              with open(path3, 'r') as f:
-                  content = f.read()
-              # 删除垃圾内容
-              content = content.replace('}        )\n}\n}\n}\n}\n', '}\n')
-              with open(path3, 'w') as f:
-                  f.write(content)
-              print(f"✓ Fixed {path3}")
-          
-          # 修复 WebExecutorScreen.kt
-          path4 = "app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt"
-          if os.path.exists(path4):
-              with open(path4, 'r') as f:
-                  lines = f.readlines()
-              if len(lines) > 300:
-                  # 截断到240行并确保正确结束
-                  fixed = lines[:240]
-                  if fixed[-1].strip() != '}':
-                      fixed.append('}\n')
-                  with open(path4, 'w') as f:
-                      f.writelines(fixed)
-                  print(f"✓ Truncated {path4} to 240 lines")
-          
-          print("=== Fix complete ===")
-          PYEOF
+
+path2 = 'app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt'
+with open(path2, 'w') as f:
+    f.write(exec_control)
+print(f'Rewrote {path2}')
+
+path3 = 'app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt'
+if os.path.exists(path3):
+    with open(path3, 'r') as f:
+        content = f.read()
+    content = content.replace('}        )\n}\n}\n}\n}\n', '}\n')
+    with open(path3, 'w') as f:
+        f.write(content)
+    print(f'Fixed {path3}')
+
+path4 = 'app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt'
+if os.path.exists(path4):
+    with open(path4, 'r') as f:
+        lines = f.readlines()
+    if len(lines) > 300:
+        fixed = lines[:240]
+        if fixed[-1].strip() != '}':
+            fixed.append('}\n')
+        with open(path4, 'w') as f:
+            f.writelines(fixed)
+        print(f'Truncated {path4} to {len(fixed)} lines')
+
+print('=== Fix complete ===')
+PYEOF
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
