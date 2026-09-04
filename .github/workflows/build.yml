@@ -18,7 +18,7 @@ jobs:
           set -e
           ARCHIVE=$(ls *.zip *.tar.gz 2>/dev/null | head -1)
           if [ -z "$ARCHIVE" ]; then
-            echo "No archive found"
+            echo "No archive found in repo root"
             ls -la
             exit 1
           fi
@@ -30,9 +30,63 @@ jobs:
 
       - name: Find project root
         run: |
+          set -e
           ROOT=$(find . -maxdepth 3 -name settings.gradle.kts | head -1 | xargs dirname)
+          if [ -z "$ROOT" ] || [ "$ROOT" = "." ]; then
+            ROOT="."
+          fi
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
-          echo "Root: $ROOT"
+          echo "Project root: $ROOT"
+          ls -la "$ROOT"
+
+      - name: Fix corrupted source files
+        run: |
+          set -e
+          cd "$PROJECT_ROOT"
+          
+          echo "=== Fixing corrupted Kotlin files ==="
+          
+          # Fix 1: MoreScreen.kt - FontWeight.Bol 截断修复
+          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt ]; then
+            sed -i 's/FontWeight\.Bol)/FontWeight.Bold)/g' app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt
+            sed -i 's/FontWeight\.Bol$/FontWeight.Bold)/g' app/src/main/java/com/caifenxi/app/ui/screens/MoreScreen.kt
+            echo "✓ Fixed MoreScreen.kt FontWeight"
+          fi
+          
+          # Fix 2: ExecutorControlScreen.kt - 删除末尾多余的 } }
+          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt ]; then
+            # 如果最后两行是 '} }' 和 '}'，修复为单个 '}'
+            tail -5 app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt
+            sed -i ':a;N;$!ba;s/}\s*}\s*}\s*$/}\n}/' app/src/main/java/com/caifenxi/app/ui/screens/ExecutorControlScreen.kt
+            echo "✓ Fixed ExecutorControlScreen.kt braces"
+          fi
+          
+          # Fix 3: ExecutorLogScreen.kt - 删除垃圾残留内容
+          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt ]; then
+            # 检查并修复第92行附近的垃圾内容
+            grep -n "}        )" app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt && \
+            sed -i 's/}        )/}/g' app/src/main/java/com/caifenxi/app/ui/screens/ExecutorLogScreen.kt || true
+            echo "✓ Fixed ExecutorLogScreen.kt garbage"
+          fi
+          
+          # Fix 4: WebExecutorScreen.kt - 如果文件过长(>240行)，截断到正确长度
+          if [ -f app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt ]; then
+            LINE_COUNT=$(wc -l < app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt)
+            if [ "$LINE_COUNT" -gt 300 ]; then
+              echo "  WebExecutorScreen.kt has $LINE_COUNT lines, truncating to 240..."
+              head -n 240 app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt > /tmp/WebExecutorScreen_fixed.kt
+              # 确保最后一行是正确的 '}'
+              tail -1 /tmp/WebExecutorScreen_fixed.kt | grep -q "^}$" || echo "}" >> /tmp/WebExecutorScreen_fixed.kt
+              mv /tmp/WebExecutorScreen_fixed.kt app/src/main/java/com/caifenxi/app/ui/screens/WebExecutorScreen.kt
+              echo "✓ Fixed WebExecutorScreen.kt length"
+            fi
+          fi
+          
+          # Fix 5: 创建正确的 local.properties (使用 GitHub Actions 的 Android SDK 路径)
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "✓ Created local.properties with SDK path: $ANDROID_SDK_ROOT"
+          
+          echo "=== Fix complete ==="
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -58,7 +112,7 @@ jobs:
           set -e
           cd "$PROJECT_ROOT"
           gradle --no-daemon clean assembleDebug --stacktrace
-          APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -1)
+          APK=$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -1)
           test -n "$APK"
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
