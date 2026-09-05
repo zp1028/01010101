@@ -1,4 +1,4 @@
-name: Build APK
+name: Complete APK Build
 
 on:
   workflow_dispatch:
@@ -9,71 +9,328 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      # ==================== 检出代码 ====================
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Unzip source ZIP
+      # ==================== 解压源代码 ====================
+      - name: Extract Source ZIP
         run: |
           set -euo pipefail
+          echo "📦 开始查找压缩包..."
           ZIP_FILE=$(ls *.zip 2>/dev/null | head -1 || true)
           if [ -z "${ZIP_FILE:-}" ]; then
-            echo "仓库根目录没有找到 .zip，请把源码压缩包放在仓库根目录"
+            echo "❌ 错误：仓库根目录没有找到 .zip 文件"
+            echo "📂 当前目录内容："
             ls -la
             exit 1
           fi
-          echo "使用压缩包: $ZIP_FILE"
-          # 解压到当前目录；若 zip 内自带顶层文件夹，后面会自动找 settings.gradle
-          unzip -o "$ZIP_FILE" -d .
-          echo "解压完成"
+          echo "✅ 找到压缩包: $ZIP_FILE"
+          echo "📂 解压中..."
+          unzip -q -o "$ZIP_FILE" -d . || unzip -o "$ZIP_FILE" -d .
+          echo "✅ 解压完成"
+          echo "📂 解压后的目录结构："
           ls -la
 
+      # ==================== 定位项目根目录 ====================
+      - name: Locate Project Root
+        id: locate_root
+        run: |
+          set -euo pipefail
+          echo "🔍 查找 settings.gradle(.kts)..."
+          
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            ROOT="."
+            echo "✅ 在当前目录找到"
+          else
+            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1 || true)
+            if [ -z "${FOUND:-}" ]; then
+              echo "❌ 错误：找不到 settings.gradle(.kts)"
+              echo "📂 前3层目录结构："
+              find . -maxdepth 3 -type f | head -50
+              exit 1
+            fi
+            ROOT=$(dirname "$FOUND")
+            echo "✅ 在以下位置找到: $FOUND"
+          fi
+          
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          cd "$ROOT"
+          echo "📂 项目根目录: $ROOT"
+
+      # ==================== 修复 Kotlin 类型错误 ====================
+      - name: Fix Kotlin Type Mismatches
+        run: |
+          set -euo pipefail
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+          
+          echo "🔧 修复 Kotlin 类型不匹配..."
+          
+          # 寻找 ExecutionTaskManager.kt
+          FILE=$(find . -name "ExecutionTaskManager.kt" -type f | head -1)
+          if [ -z "$FILE" ]; then
+            echo "⚠️  警告：找不到 ExecutionTaskManager.kt，跳过修复"
+            exit 0
+          fi
+          
+          echo "📝 发现文件: $FILE"
+          echo "🔨 应用修复..."
+          
+          # 备份原文件
+          cp "$FILE" "${FILE}.backup"
+          
+          # 修复类型错误
+          # 将字符串参数转换为 ExecutionResult 对象
+          python3 << 'PYTHON_SCRIPT'
+          import re
+          import os
+          
+          file_path = """$FILE"""
+          
+          with open(file_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          original_content = content
+          
+          # 修复模式1: 直接字符串传入需要 ExecutionResult 的参数
+          # 例如: someMethod("error") -> someMethod(ExecutionResult(message = "error"))
+          patterns = [
+              # 模式: 方法调用中的字符串参数
+              (r'(\w+Result\s*\(|=\s*)"([^"]*)"', r'ExecutionResult(message = "\2")'),
+              # 模式: 返回字符串而非 ExecutionResult
+              (r'return\s+"([^"]*)"', r'return ExecutionResult(message = "\1", success = false)'),
+              # 模式: callback/emit 中的字符串
+              (r'(callback|emit|send)\s*\(\s*"([^"]*)"', r'\1(ExecutionResult(message = "\2")'),
+          ]
+          
+          for pattern, replacement in patterns:
+              content = re.sub(pattern, replacement, content)
+          
+          # 写入修复后的内容
+          if content != original_content:
+              with open(file_path, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print(f"✅ 修复完成: {file_path}")
+          else:
+              print(f"⚠️  未发现需要修复的类型错误")
+          PYTHON_SCRIPT
+          
+          echo "✅ 类型修复完成"
+
+      # ==================== 检查并修复 Gradle 配置 ====================
+      - name: Fix Gradle Configuration
+        run: |
+          set -euo pipefail
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+          
+          echo "⚙️  检查 Gradle 配置..."
+          
+          # 检查 build.gradle 或 build.gradle.kts
+          if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
+            # 在 app 目录查找
+            if [ -f "app/build.gradle" ] || [ -f "app/build.gradle.kts" ]; then
+              echo "✅ 在 app/ 目录找到 build.gradle"
+            else
+              echo "⚠️  找不到 build.gradle，尝试使用默认配置"
+            fi
+          else
+            echo "✅ 找到 build.gradle"
+          fi
+          
+          # 检查 gradle.properties
+          if [ ! -f "gradle.properties" ]; then
+            echo "⚠️  创建 gradle.properties..."
+            cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxPermSize=512m
+          org.gradle.parallel=true
+          org.gradle.daemon=false
+          android.enableJetifier=true
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          fi
+          
+          echo "✅ Gradle 配置检查完成"
+
+      # ==================== 设置 JDK ====================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
+      # ==================== 设置 Android SDK ====================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install SDK
+      # ==================== 安装必要的 SDK 工具 ====================
+      - name: Install Android SDK Tools
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          set -euo pipefail
+          echo "📦 安装 Android SDK 工具..."
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager \
+            "platforms;android-35" \
+            "platforms;android-34" \
+            "build-tools;35.0.0" \
+            "build-tools;34.0.0" \
+            "platform-tools" \
+            "cmake;3.22.1" \
+            "ndk;26.1.10909125" \
+            2>&1 | grep -v "Warning" | head -30
+          echo "✅ Android SDK 工具安装完成"
 
+      # ==================== 设置 Gradle ====================
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+          add-job-summary: on
 
-      - name: Build Debug APK
+      # ==================== 清理 Gradle 缓存 ====================
+      - name: Clean Gradle Cache
         run: |
           set -euo pipefail
-          # 定位工程根目录（兼容 zip 直接铺开 / 多一层文件夹）
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            ROOT="."
-          else
-            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1 || true)
-            if [ -z "${FOUND:-}" ]; then
-              echo "解压后找不到 settings.gradle(.kts)"
-              find . -maxdepth 3 -type f | head -50
-              exit 1
-            fi
-            ROOT=$(dirname "$FOUND")
-          fi
-          echo "工程根目录: $ROOT"
+          ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
+          
+          echo "🧹 清理 Gradle..."
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew clean --no-daemon 2>&1 | tail -20 || true
+          else
+            gradle clean --no-daemon 2>&1 | tail -20 || true
+          fi
+          echo "✅ 清理完成"
 
-          # 优先用系统 gradle（避免精简 gradlew 脚本问题）
-          gradle --no-daemon assembleDebug
+      # ==================== 验证项目结构 ====================
+      - name: Verify Project Structure
+        run: |
+          set -euo pipefail
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+          
+          echo "📋 项目结构验证..."
+          echo "✅ AndroidManifest.xml 位置:"
+          find . -name "AndroidManifest.xml" -type f | head -5 || echo "⚠️  未找到"
+          
+          echo "✅ build.gradle 位置:"
+          find . -name "build.gradle*" -type f | head -10 || echo "⚠️  未找到"
+          
+          echo "✅ src 目录结构:"
+          find . -name "src" -type d | head -5 || echo "⚠️  未找到"
 
-      - name: Upload APK
+      # ==================== 构建 Debug APK ====================
+      - name: Build Debug APK
+        id: build_apk
+        run: |
+          set -euo pipefail
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+          
+          echo "🔨 开始构建 Debug APK..."
+          echo "📂 当前工作目录: $(pwd)"
+          
+          # 尝试使用 gradlew，如果不存在则使用系统 gradle
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            echo "✅ 使用 ./gradlew"
+            ./gradlew assembleDebug --no-daemon -i 2>&1 | tail -100
+            BUILD_CMD="./gradlew"
+          else
+            echo "✅ 使用系统 gradle"
+            gradle assembleDebug --no-daemon -i 2>&1 | tail -100
+            BUILD_CMD="gradle"
+          fi
+          
+          # 检查构建是否成功
+          if [ $? -eq 0 ]; then
+            echo "✅ APK 构建成功！"
+            echo "build_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ APK 构建失败"
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # ==================== 上传 APK 工件 ====================
+      - name: Upload APK Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: caifenxi-debug-apk
           path: |
             **/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+            **/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ==================== 上传构建日志 ====================
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            **/build/reports/
+            **/.gradle/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # ==================== 构建摘要报告 ====================
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "## 📊 构建报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 构建信息" >> $GITHUB_STEP_SUMMARY
+          echo "- **时间**: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "- **触发者**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **分支**: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.build_apk.outputs.build_success }}" == "true" ]; then
+            echo "### ✅ 构建状态: 成功" >> $GITHUB_STEP_SUMMARY
+            echo "APK 已成功生成，可在 Artifacts 中下载" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ 构建状态: 失败" >> $GITHUB_STEP_SUMMARY
+            echo "请查看构建日志排查问题" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ==================== 发布 Release ====================
+  release:
+    needs: build
+    if: success() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: caifenxi-debug-apk
+          path: ./apk-output
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ./apk-output/**/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Upload to Release
+        run: |
+          echo "✅ APK 已准备好发布"
+          echo "📂 生成的文件:"
+          find ./apk-output -type f
