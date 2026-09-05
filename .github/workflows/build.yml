@@ -3,11 +3,13 @@ name: Build APK
 on:
   workflow_dispatch:
   push:
+    branches: [ main, master ]
+  pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -15,14 +17,18 @@ jobs:
 
       - name: Unzip source ZIP
         run: |
-          set -e
-          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "No zip in repo root"
+          set -euo pipefail
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1 || true)
+          if [ -z "${ZIP_FILE:-}" ]; then
+            echo "仓库根目录没有找到 .zip，请把源码压缩包放在仓库根目录"
+            ls -la
             exit 1
           fi
-          echo "ZIP=$ZIP_FILE"
+          echo "使用压缩包: $ZIP_FILE"
+          # 解压到当前目录；若 zip 内自带顶层文件夹，后面会自动找 settings.gradle
           unzip -o "$ZIP_FILE" -d .
+          echo "解压完成"
+          ls -la
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -45,38 +51,29 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          set -e
+          set -euo pipefail
+          # 定位工程根目录（兼容 zip 直接铺开 / 多一层文件夹）
           if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
             ROOT="."
           else
-            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1)
+            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1 || true)
+            if [ -z "${FOUND:-}" ]; then
+              echo "解压后找不到 settings.gradle(.kts)"
+              find . -maxdepth 3 -type f | head -50
+              exit 1
+            fi
             ROOT=$(dirname "$FOUND")
           fi
-          echo "ROOT=$ROOT"
+          echo "工程根目录: $ROOT"
           cd "$ROOT"
-          rm -rf .gradle
-          if [ -f ./gradlew ]; then
-            sed -i 's/\r$//' ./gradlew || true
-            chmod +x ./gradlew
-            ./gradlew --no-daemon clean assembleDebug --stacktrace
-          else
-            gradle --no-daemon clean assembleDebug --stacktrace
-          fi
-          APK=$(find . -path "*/outputs/apk/debug/*.apk" -type f | head -1)
-          test -n "$APK"
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
-          cd "$GITHUB_WORKSPACE/artifacts"
-          zip -9 caifenxi-debug.zip app-debug.apk
 
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: caifenxi-debug-zip
-          path: artifacts/caifenxi-debug.zip
+          # 优先用系统 gradle（避免精简 gradlew 脚本问题）
+          gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: caifenxi-debug-apk
-          path: artifacts/app-debug.apk
+          path: |
+            **/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
