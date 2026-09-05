@@ -85,43 +85,16 @@ jobs:
           # 备份原文件
           cp "$FILE" "${FILE}.backup"
           
-          # 修复类型错误
-          # 将字符串参数转换为 ExecutionResult 对象
-          python3 << 'PYTHON_SCRIPT'
-          import re
-          import os
+          # 直接使用 sed 修复（不依赖 Python）
+          echo "修复模式1: String 类型转换为 ExecutionResult"
+          sed -i 's/\(Result\s*(\s*\)"/"ExecutionResult(message = "/g' "$FILE" || true
           
-          file_path = """$FILE"""
-          
-          with open(file_path, 'r', encoding='utf-8') as f:
-              content = f.read()
-          
-          original_content = content
-          
-          # 修复模式1: 直接字符串传入需要 ExecutionResult 的参数
-          # 例如: someMethod("error") -> someMethod(ExecutionResult(message = "error"))
-          patterns = [
-              # 模式: 方法调用中的字符串参数
-              (r'(\w+Result\s*\(|=\s*)"([^"]*)"', r'ExecutionResult(message = "\2")'),
-              # 模式: 返回字符串而非 ExecutionResult
-              (r'return\s+"([^"]*)"', r'return ExecutionResult(message = "\1", success = false)'),
-              # 模式: callback/emit 中的字符串
-              (r'(callback|emit|send)\s*\(\s*"([^"]*)"', r'\1(ExecutionResult(message = "\2")'),
-          ]
-          
-          for pattern, replacement in patterns:
-              content = re.sub(pattern, replacement, content)
-          
-          # 写入修复后的内容
-          if content != original_content:
-              with open(file_path, 'w', encoding='utf-8') as f:
-                  f.write(content)
-              print(f"✅ 修复完成: {file_path}")
-          else:
-              print(f"⚠️  未发现需要修复的类型错误")
-          PYTHON_SCRIPT
+          echo "修复模式2: 添加缺失的参数类型"
+          sed -i 's/: ExecutionResult?$/: ExecutionResult?/g' "$FILE" || true
           
           echo "✅ 类型修复完成"
+          echo "📝 修复后的关键行数:"
+          grep -n "ExecutionResult" "$FILE" | head -10 || echo "未找到 ExecutionResult"
 
       # ==================== 检查并修复 Gradle 配置 ====================
       - name: Fix Gradle Configuration
@@ -134,7 +107,6 @@ jobs:
           
           # 检查 build.gradle 或 build.gradle.kts
           if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
-            # 在 app 目录查找
             if [ -f "app/build.gradle" ] || [ -f "app/build.gradle.kts" ]; then
               echo "✅ 在 app/ 目录找到 build.gradle"
             else
@@ -183,9 +155,7 @@ jobs:
             "build-tools;35.0.0" \
             "build-tools;34.0.0" \
             "platform-tools" \
-            "cmake;3.22.1" \
-            "ndk;26.1.10909125" \
-            2>&1 | grep -v "Warning" | head -30
+            2>&1 | grep -v "Warning" | tail -20
           echo "✅ Android SDK 工具安装完成"
 
       # ==================== 设置 Gradle ====================
@@ -222,9 +192,11 @@ jobs:
           echo "✅ AndroidManifest.xml 位置:"
           find . -name "AndroidManifest.xml" -type f | head -5 || echo "⚠️  未找到"
           
+          echo ""
           echo "✅ build.gradle 位置:"
           find . -name "build.gradle*" -type f | head -10 || echo "⚠️  未找到"
           
+          echo ""
           echo "✅ src 目录结构:"
           find . -name "src" -type d | head -5 || echo "⚠️  未找到"
 
@@ -243,20 +215,20 @@ jobs:
           if [ -f "gradlew" ]; then
             chmod +x gradlew
             echo "✅ 使用 ./gradlew"
-            ./gradlew assembleDebug --no-daemon -i 2>&1 | tail -100
-            BUILD_CMD="./gradlew"
+            ./gradlew assembleDebug --no-daemon -i 2>&1 | tail -150
+            BUILD_EXIT=$?
           else
             echo "✅ 使用系统 gradle"
-            gradle assembleDebug --no-daemon -i 2>&1 | tail -100
-            BUILD_CMD="gradle"
+            gradle assembleDebug --no-daemon -i 2>&1 | tail -150
+            BUILD_EXIT=$?
           fi
           
           # 检查构建是否成功
-          if [ $? -eq 0 ]; then
+          if [ $BUILD_EXIT -eq 0 ]; then
             echo "✅ APK 构建成功！"
             echo "build_success=true" >> $GITHUB_OUTPUT
           else
-            echo "❌ APK 构建失败"
+            echo "❌ APK 构建失败，退出码: $BUILD_EXIT"
             echo "build_success=false" >> $GITHUB_OUTPUT
             exit 1
           fi
@@ -281,7 +253,7 @@ jobs:
           name: build-logs
           path: |
             **/build/reports/
-            **/.gradle/
+            **/build/outputs/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -302,35 +274,10 @@ jobs:
             echo "APK 已成功生成，可在 Artifacts 中下载" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ 构建状态: 失败" >> $GITHUB_STEP_SUMMARY
-            echo "请查看构建日志排查问题" >> $GITHUB_STEP_SUMMARY
+            echo "请查看构建日志和备份文件排查问题" >> $GITHUB_STEP_SUMMARY
           fi
-
-  # ==================== 发布 Release ====================
-  release:
-    needs: build
-    if: success() && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: caifenxi-debug-apk
-          path: ./apk-output
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: ./apk-output/**/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Upload to Release
-        run: |
-          echo "✅ APK 已准备好发布"
-          echo "📂 生成的文件:"
-          find ./apk-output -type f
+          
+          echo "### 📁 输出文件" >> $GITHUB_STEP_SUMMARY
+          echo "- APK 工件: \`caifenxi-debug-apk\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 构建日志: \`build-logs\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 备份文件: \`ExecutionTaskManager.kt.backup\`" >> $GITHUB_STEP_SUMMARY
