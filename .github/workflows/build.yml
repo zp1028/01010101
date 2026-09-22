@@ -18,74 +18,77 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-        # 不要写 cache: gradle
 
       - name: Extract ZIP if present
         run: |
           set -e
-          ZIP=""
-          for c in Smart-Trader-APK-ready.zip source.zip app-source.zip *.zip; do
-            if [ -f "$c" ]; then ZIP="$c"; break; fi
+          for c in Smart-Trader-APK-ready.zip source.zip app-source.zip; do
+            if [ -f "$c" ]; then
+              echo "Extracting $c"
+              mkdir -p _src
+              unzip -q -o "$c" -d _src
+              break
+            fi
           done
-          if [ -n "$ZIP" ]; then
-            echo "Extracting $ZIP"
-            mkdir -p _src
-            unzip -q -o "$ZIP" -d _src
+          # 若根目录还有其它 zip，尝试第一个
+          if [ ! -d _src ]; then
+            c=$(ls -1 *.zip 2>/dev/null | head -1 || true)
+            if [ -n "$c" ] && [ -f "$c" ]; then
+              echo "Extracting $c"
+              mkdir -p _src
+              unzip -q -o "$c" -d _src
+            fi
           fi
 
       - name: Locate Android project root
         run: |
           set -e
           FOUND=""
-          for base in _src .; do
-            [ -d "$base" ] || continue
-            if [ -f "$base/android/gradlew" ]; then FOUND="$base/android"; break; fi
-            G=$(find "$base" -name gradlew -type f 2>/dev/null | head -1 || true)
-            if [ -n "\( G" ]; then FOUND= \)(dirname "$G"); break; fi
-          done
-          [ -n "$FOUND" ] || { echo "gradlew not found"; find . -name gradlew | head; exit 1; }
+          if [ -f _src/android/gradlew ]; then
+            FOUND="_src/android"
+          elif [ -f android/gradlew ]; then
+            FOUND="android"
+          else
+            FOUND=$(find _src . -name gradlew -type f 2>/dev/null | head -1 | xargs -r dirname)
+          fi
+          if [ -z "$FOUND" ] || [ ! -d "$FOUND" ]; then
+            echo "ERROR: gradlew not found"
+            find . -name gradlew -o -name "build.gradle.kts" | head -30
+            exit 1
+          fi
           FOUND=$(cd "$FOUND" && pwd)
-          echo "dir=$FOUND" >> $GITHUB_ENV
           echo "PROJECT_ROOT=$FOUND"
+          echo "dir=$FOUND" >> "$GITHUB_ENV"
 
       - name: Prepare Android SDK
         run: |
           set -e
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$SDK/licenses"
-          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-license"
-          echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK/licenses/android-sdk-preview-license"
-          echo "sdk.dir=$SDK" > "$dir/local.properties"
-          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          [ -x "\( SM" ] || SM= \)(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1 || true)
-          if [ -n "$SM" ]; then
-            "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" || \
-            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" || true
+          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
+          printf '84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
+          printf 'sdk.dir=%s\n' "$SDK" > "$dir/local.properties"
+          if [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" || true
           fi
-          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          cat "$dir/local.properties"
 
-      # ===== 关键：覆盖坏的 gradlew，解决 ClassNotFoundException: "-Xmx64m" =====
       - name: Fix gradlew
         working-directory: ${{ env.dir }}
         run: |
-          cat > gradlew << 'SCRIPT'
-          #!/bin/sh
-          die() { echo "$*" >&2; exit 1; }
-          APP_HOME=\( (cd " \)(dirname "$0")" && pwd -P) || exit 1
-          CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
-          [ -f "$CLASSPATH" ] || die "ERROR: missing $CLASSPATH"
-          if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
-            JAVACMD="$JAVA_HOME/bin/java"
-          else
-            JAVACMD=java
-          fi
-          exec "$JAVACMD" -Xmx64m -Xms64m -classpath "\( CLASSPATH" org.gradle.wrapper.GradleWrapperMain " \)@"
-          SCRIPT
-          # 去掉 heredoc 可能带来的前导空格
-          sed -i 's/^\s\s\s\s//' gradlew 2>/dev/null || true
+          set -e
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'APP_HOME=\( (cd " \)(dirname "$0")" && pwd -P) || exit 1' \
+            'CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar' \
+            'if [ ! -f "$CLASSPATH" ]; then echo "missing $CLASSPATH" >&2; exit 1; fi' \
+            'if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then JAVACMD="$JAVA_HOME/bin/java"; else JAVACMD=java; fi' \
+            'exec "$JAVACMD" -Xmx64m -Xms64m -classpath "\( CLASSPATH" org.gradle.wrapper.GradleWrapperMain " \)@"' \
+            > gradlew
           chmod +x gradlew
           ls -la gradlew gradle/wrapper/gradle-wrapper.jar
-          head -20 gradlew
+          cat gradlew
 
       - name: Build Debug APK
         working-directory: ${{ env.dir }}
