@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       source_zip:
-        description: "可选：仓库内 zip 相对路径，如 releases/source.zip（留空则用仓库源码）"
+        description: "可选：仓库内 zip 路径，如 Smart-Trader-APK-ready.zip（留空则自动扫描或用源码）"
         required: false
         default: ""
 
@@ -20,89 +20,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 不要用 cache: gradle —— 解压前仓库可能没有 gradle 文件，会直接报错
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      - name: Extract ZIP if provided
+      - name: Extract ZIP if present
         run: |
           set -e
           ZIP="${{ github.event.inputs.source_zip }}"
-          # 也自动扫描常见位置的 zip
           if [ -z "$ZIP" ]; then
             for c in \
               Smart-Trader-APK-ready.zip \
+              Smart-Trader-CI-fix.zip \
               source.zip \
               app-source.zip \
-              releases/*.zip \
-              dist/*.zip; do
+              *.zip; do
               if [ -f "$c" ]; then ZIP="$c"; break; fi
             done
           fi
-
           if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
-            echo "Extracting $ZIP ..."
+            echo "Extracting: $ZIP"
             mkdir -p _src
             unzip -q -o "$ZIP" -d _src
-            echo "extracted=1" >> $GITHUB_ENV
           else
-            echo "No zip found, use repository tree"
-            echo "extracted=0" >> $GITHUB_ENV
+            echo "No zip; use repo tree"
           fi
 
-      - name: Locate project root (gradlew)
-        id: root
+      - name: Locate Android project root
         run: |
           set -e
-          # 优先搜索解压目录，再搜仓库根
-          SEARCH_DIRS="."
-          [ -d _src ] && SEARCH_DIRS="_src ."
-
           FOUND=""
-          for base in $SEARCH_DIRS; do
-            # 优先 android/gradlew
+          for base in _src .; do
+            [ -d "$base" ] || continue
             if [ -f "$base/android/gradlew" ]; then
               FOUND="$base/android"
               break
             fi
-            # 任意 gradlew
-            G=$(find "$base" -name gradlew -type f 2>/dev/null | head -1)
+            G=$(find "$base" -name gradlew -type f 2>/dev/null | head -1 || true)
             if [ -n "$G" ]; then
               FOUND=$(dirname "$G")
               break
             fi
-            # 仅有 build.gradle.kts 的 android 目录
-            if [ -f "$base/android/app/build.gradle.kts" ]; then
-              FOUND="$base/android"
-              break
-            fi
           done
-
           if [ -z "$FOUND" ]; then
-            echo "ERROR: cannot find Android project (gradlew)"
-            find . -maxdepth 4 \( -name gradlew -o -name "build.gradle.kts" \) | head -30
+            echo "ERROR: gradlew not found"
+            find . -maxdepth 5 \( -name gradlew -o -name "*.gradle*" -o -name "gradle-wrapper.properties" \) | head -40
             exit 1
           fi
-
-          # 转成绝对路径
           FOUND=$(cd "$FOUND" && pwd)
           echo "PROJECT_ROOT=$FOUND"
           echo "dir=$FOUND" >> $GITHUB_ENV
-          echo "dir=$FOUND" >> $GITHUB_OUTPUT
-
-          # 若没有 wrapper，尝试从仓库 android 复制（可选）
-          if [ ! -f "$FOUND/gradlew" ]; then
-            echo "WARNING: no gradlew in $FOUND"
-          fi
 
       - name: Prepare Android SDK (no interactive licenses)
         run: |
           set -e
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          echo "Using SDK at $SDK"
           mkdir -p "$SDK/licenses"
           echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-license"
           echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK/licenses/android-sdk-preview-license"
@@ -114,31 +89,28 @@ jobs:
           SM=""
           for c in \
             "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "$SDK/cmdline-tools/bin/sdkmanager" \
             "$(ls -d $SDK/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"; do
             if [ -x "$c" ]; then SM="$c"; break; fi
           done
-          echo "sdkmanager=$SM"
           if [ -n "$SM" ]; then
             "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" "platform-tools" || \
             "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
           fi
 
-          echo "sdk.dir=\( SDK" > " \){{ env.dir }}/local.properties"
+          echo "sdk.dir=$SDK" > "$dir/local.properties"
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
-          cat "${{ env.dir }}/local.properties"
+          cat "$dir/local.properties"
 
       - name: Build Debug APK
         working-directory: ${{ env.dir }}
         run: |
-          chmod +x gradlew || true
+          chmod +x gradlew
           ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: smart-trader-debug-apk
-          path: |
-            **/app/build/outputs/apk/debug/*.apk
+          path: "**/app/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
