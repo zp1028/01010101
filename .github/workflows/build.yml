@@ -5,11 +5,6 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
-    inputs:
-      source_zip:
-        description: "可选：仓库内 zip 路径，如 Smart-Trader-APK-ready.zip（留空则自动扫描或用源码）"
-        required: false
-        default: ""
 
 jobs:
   build:
@@ -17,36 +12,25 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 不要用 cache: gradle —— 解压前仓库可能没有 gradle 文件，会直接报错
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
+        # 不要写 cache: gradle
 
       - name: Extract ZIP if present
         run: |
           set -e
-          ZIP="${{ github.event.inputs.source_zip }}"
-          if [ -z "$ZIP" ]; then
-            for c in \
-              Smart-Trader-APK-ready.zip \
-              Smart-Trader-CI-fix.zip \
-              source.zip \
-              app-source.zip \
-              *.zip; do
-              if [ -f "$c" ]; then ZIP="$c"; break; fi
-            done
-          fi
-          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
-            echo "Extracting: $ZIP"
+          ZIP=""
+          for c in Smart-Trader-APK-ready.zip source.zip app-source.zip *.zip; do
+            if [ -f "$c" ]; then ZIP="$c"; break; fi
+          done
+          if [ -n "$ZIP" ]; then
+            echo "Extracting $ZIP"
             mkdir -p _src
             unzip -q -o "$ZIP" -d _src
-          else
-            echo "No zip; use repo tree"
           fi
 
       - name: Locate Android project root
@@ -55,61 +39,59 @@ jobs:
           FOUND=""
           for base in _src .; do
             [ -d "$base" ] || continue
-            if [ -f "$base/android/gradlew" ]; then
-              FOUND="$base/android"
-              break
-            fi
+            if [ -f "$base/android/gradlew" ]; then FOUND="$base/android"; break; fi
             G=$(find "$base" -name gradlew -type f 2>/dev/null | head -1 || true)
-            if [ -n "$G" ]; then
-              FOUND=$(dirname "$G")
-              break
-            fi
+            if [ -n "\( G" ]; then FOUND= \)(dirname "$G"); break; fi
           done
-          if [ -z "$FOUND" ]; then
-            echo "ERROR: gradlew not found"
-            find . -maxdepth 5 \( -name gradlew -o -name "*.gradle*" -o -name "gradle-wrapper.properties" \) | head -40
-            exit 1
-          fi
+          [ -n "$FOUND" ] || { echo "gradlew not found"; find . -name gradlew | head; exit 1; }
           FOUND=$(cd "$FOUND" && pwd)
-          echo "PROJECT_ROOT=$FOUND"
           echo "dir=$FOUND" >> $GITHUB_ENV
+          echo "PROJECT_ROOT=$FOUND"
 
-      - name: Prepare Android SDK (no interactive licenses)
+      - name: Prepare Android SDK
         run: |
           set -e
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$SDK/licenses"
           echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-license"
           echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK/licenses/android-sdk-preview-license"
-          echo -e "d56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-arm-dbt-license"
-          echo -e "33b6a2b64607f11b759f320ef9cffc76f9f6a622\n" > "$SDK/licenses/google-gdk-license"
-          echo -e "e9acab5b5f89150e0cfd9fe77af5f9599ca0f67d\n" > "$SDK/licenses/android-googletv-license"
-          echo -e "601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "$SDK/licenses/android-googlexr-license"
-
-          SM=""
-          for c in \
-            "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "$(ls -d $SDK/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"; do
-            if [ -x "$c" ]; then SM="$c"; break; fi
-          done
-          if [ -n "$SM" ]; then
-            "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" "platform-tools" || \
-            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
-          fi
-
           echo "sdk.dir=$SDK" > "$dir/local.properties"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "\( SM" ] || SM= \)(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1 || true)
+          if [ -n "$SM" ]; then
+            "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" || \
+            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" || true
+          fi
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
-          cat "$dir/local.properties"
+
+      # ===== 关键：覆盖坏的 gradlew，解决 ClassNotFoundException: "-Xmx64m" =====
+      - name: Fix gradlew
+        working-directory: ${{ env.dir }}
+        run: |
+          cat > gradlew << 'SCRIPT'
+          #!/bin/sh
+          die() { echo "$*" >&2; exit 1; }
+          APP_HOME=\( (cd " \)(dirname "$0")" && pwd -P) || exit 1
+          CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+          [ -f "$CLASSPATH" ] || die "ERROR: missing $CLASSPATH"
+          if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+            JAVACMD="$JAVA_HOME/bin/java"
+          else
+            JAVACMD=java
+          fi
+          exec "$JAVACMD" -Xmx64m -Xms64m -classpath "\( CLASSPATH" org.gradle.wrapper.GradleWrapperMain " \)@"
+          SCRIPT
+          # 去掉 heredoc 可能带来的前导空格
+          sed -i 's/^\s\s\s\s//' gradlew 2>/dev/null || true
+          chmod +x gradlew
+          ls -la gradlew gradle/wrapper/gradle-wrapper.jar
+          head -20 gradlew
 
       - name: Build Debug APK
         working-directory: ${{ env.dir }}
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace --no-daemon
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: smart-trader-debug-apk
           path: "**/app/build/outputs/apk/debug/*.apk"
