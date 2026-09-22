@@ -1,53 +1,24 @@
-name: Complete APK Build
+name: Build APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: "可选：仓库内 zip 相对路径，如 releases/source.zip（留空则用仓库源码）"
+        required: false
+        default: ""
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Extract Source ZIP
-        run: |
-          set -euo pipefail
-          echo "📦 开始查找压缩包..."
-          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1 || true)
-          if [ -z "${ZIP_FILE:-}" ]; then
-            echo "❌ 错误：仓库根目录没有找到 .zip 文件"
-            exit 1
-          fi
-          echo "✅ 找到压缩包: $ZIP_FILE"
-          unzip -q -o "$ZIP_FILE" -d .
-          echo "✅ 解压完成"
-
-      - name: Locate Project Root
-        id: locate_root
-        run: |
-          set -euo pipefail
-          echo "🔍 查找 settings.gradle(.kts)..."
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            ROOT="."
-          else
-            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1 || true)
-            if [ -z "${FOUND:-}" ]; then
-              echo "❌ 错误：找不到 settings.gradle(.kts)"
-              find . -maxdepth 3 -type f | head -50
-              exit 1
-            fi
-            ROOT=$(dirname "$FOUND")
-          fi
-          echo "root=$ROOT" >> $GITHUB_OUTPUT
-          echo "📂 项目根目录: $ROOT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -56,96 +27,118 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK Tools
+      - name: Extract ZIP if provided
         run: |
-          set -euo pipefail
-          echo "📦 安装 Android SDK 工具..."
-          # 强制使用绝对路径，防止 PATH 问题
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-            "platforms;android-35" \
-            "platforms;android-34" \
-            "build-tools;35.0.0" \
-            "build-tools;34.0.0" \
-            "platform-tools" \
-            2>&1 | grep -v "Warning" | tail -20
-          echo "✅ Android SDK 工具安装完成"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-          add-job-summary: on
-
-      - name: Clean Gradle Cache
-        run: |
-          set -euo pipefail
-          ROOT="${{ steps.locate_root.outputs.root }}"
-          cd "$ROOT"
-          echo "🧹 清理 Gradle..."
-          if [ -f "gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew clean --no-daemon 2>&1 | tail -20 || true
-          else
-            gradle clean --no-daemon 2>&1 | tail -20 || true
+          set -e
+          ZIP="${{ github.event.inputs.source_zip }}"
+          # 也自动扫描常见位置的 zip
+          if [ -z "$ZIP" ]; then
+            for c in \
+              Smart-Trader-APK-ready.zip \
+              source.zip \
+              app-source.zip \
+              releases/*.zip \
+              dist/*.zip; do
+              if [ -f "$c" ]; then ZIP="$c"; break; fi
+            done
           fi
 
-      - name: Build Debug APK
-        id: build_apk
-        run: |
-          set -euo pipefail
-          ROOT="${{ steps.locate_root.outputs.root }}"
-          cd "$ROOT"
-          echo "🔨 开始构建 Debug APK..."
-          if [ -f "gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon 2>&1 | tail -200
-            BUILD_EXIT=$?
+          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
+            echo "Extracting $ZIP ..."
+            mkdir -p _src
+            unzip -q -o "$ZIP" -d _src
+            echo "extracted=1" >> $GITHUB_ENV
           else
-            gradle assembleDebug --no-daemon 2>&1 | tail -200
-            BUILD_EXIT=$?
+            echo "No zip found, use repository tree"
+            echo "extracted=0" >> $GITHUB_ENV
           fi
-          if [ $BUILD_EXIT -eq 0 ]; then
-            echo "✅ APK 构建成功！"
-            echo "build_success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ APK 构建失败，退出码: $BUILD_EXIT"
-            echo "build_success=false" >> $GITHUB_OUTPUT
+
+      - name: Locate project root (gradlew)
+        id: root
+        run: |
+          set -e
+          # 优先搜索解压目录，再搜仓库根
+          SEARCH_DIRS="."
+          [ -d _src ] && SEARCH_DIRS="_src ."
+
+          FOUND=""
+          for base in $SEARCH_DIRS; do
+            # 优先 android/gradlew
+            if [ -f "$base/android/gradlew" ]; then
+              FOUND="$base/android"
+              break
+            fi
+            # 任意 gradlew
+            G=$(find "$base" -name gradlew -type f 2>/dev/null | head -1)
+            if [ -n "$G" ]; then
+              FOUND=$(dirname "$G")
+              break
+            fi
+            # 仅有 build.gradle.kts 的 android 目录
+            if [ -f "$base/android/app/build.gradle.kts" ]; then
+              FOUND="$base/android"
+              break
+            fi
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "ERROR: cannot find Android project (gradlew)"
+            find . -maxdepth 4 \( -name gradlew -o -name "build.gradle.kts" \) | head -30
             exit 1
           fi
 
-      - name: Upload APK Artifact
-        if: success()
+          # 转成绝对路径
+          FOUND=$(cd "$FOUND" && pwd)
+          echo "PROJECT_ROOT=$FOUND"
+          echo "dir=$FOUND" >> $GITHUB_ENV
+          echo "dir=$FOUND" >> $GITHUB_OUTPUT
+
+          # 若没有 wrapper，尝试从仓库 android 复制（可选）
+          if [ ! -f "$FOUND/gradlew" ]; then
+            echo "WARNING: no gradlew in $FOUND"
+          fi
+
+      - name: Prepare Android SDK (no interactive licenses)
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "Using SDK at $SDK"
+          mkdir -p "$SDK/licenses"
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-license"
+          echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK/licenses/android-sdk-preview-license"
+          echo -e "d56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK/licenses/android-sdk-arm-dbt-license"
+          echo -e "33b6a2b64607f11b759f320ef9cffc76f9f6a622\n" > "$SDK/licenses/google-gdk-license"
+          echo -e "e9acab5b5f89150e0cfd9fe77af5f9599ca0f67d\n" > "$SDK/licenses/android-googletv-license"
+          echo -e "601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "$SDK/licenses/android-googlexr-license"
+
+          SM=""
+          for c in \
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK/cmdline-tools/bin/sdkmanager" \
+            "$(ls -d $SDK/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"; do
+            if [ -x "$c" ]; then SM="$c"; break; fi
+          done
+          echo "sdkmanager=$SM"
+          if [ -n "$SM" ]; then
+            "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" "platform-tools" || \
+            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
+          fi
+
+          echo "sdk.dir=\( SDK" > " \){{ env.dir }}/local.properties"
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          cat "${{ env.dir }}/local.properties"
+
+      - name: Build Debug APK
+        working-directory: ${{ env.dir }}
+        run: |
+          chmod +x gradlew || true
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: caifenxi-debug-apk
+          name: smart-trader-debug-apk
           path: |
             **/app/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Upload Build Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            **/build/reports/
-            **/build/outputs/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Build Summary
-        if: always()
-        run: |
-          echo "## 📊 构建报告" >> $GITHUB_STEP_SUMMARY
-          echo "- **时间**: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.build_apk.outputs.build_success }}" == "true" ]; then
-            echo "### ✅ 构建状态: 成功" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### ❌ 构建状态: 失败" >> $GITHUB_STEP_SUMMARY
-          fi
+          if-no-files-found: error
