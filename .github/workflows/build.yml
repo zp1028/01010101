@@ -5,10 +5,11 @@ on:
 
 jobs:
   build:
+    name: Extract ZIP and Build APK
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 拉取仓库
+      # 1. 获取当前仓库
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -19,22 +20,31 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # 3. Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK
+      # 3. 使用 GitHub Runner 自带 Android SDK
+      - name: Check Android SDK
+        shell: bash
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          set -e
 
-      # 4. 找到 ZIP
-      - name: Find ZIP
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          echo "Android SDK platforms:"
+          ls -la "$ANDROID_HOME/platforms" || true
+
+          echo "Android build tools:"
+          ls -la "$ANDROID_HOME/build-tools" || true
+
+          echo "sdkmanager:"
+          command -v sdkmanager || true
+
+      # 4. 找源码 ZIP
+      - name: Find Source ZIP
         id: find_zip
+        shell: bash
         run: |
+          set -e
+
           ZIP=$(find . \
             -type f \
             -iname "*.zip" \
@@ -42,39 +52,42 @@ jobs:
             | head -1)
 
           if [ -z "$ZIP" ]; then
-            echo "没有找到 ZIP 文件"
+            echo "ERROR: No source ZIP found."
             exit 1
           fi
 
-          echo "找到 ZIP:"
+          echo "Using source ZIP:"
           echo "$ZIP"
 
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      # 5. 自动解压
-      - name: Extract ZIP
+      # 5. 解压源码
+      - name: Extract Source ZIP
         run: |
+          set -e
+
           rm -rf source
           mkdir -p source
 
           unzip -q "${{ steps.find_zip.outputs.zip }}" -d source
 
-          echo "解压完成"
+          echo "Source extracted successfully."
+
           find source -maxdepth 4 -type f | head -200
 
       # 6. 自动寻找 Android 工程
       - name: Find Android Project
         id: project
+        shell: bash
         run: |
+          set -e
+
           ROOT=""
 
-          while IFS= read -r FILE; do
-            DIR=$(dirname "$FILE")
+          while IFS= read -r SETTINGS; do
+            DIR=$(dirname "$SETTINGS")
 
-            if [ -f "$DIR/gradlew" ] && \
-               { [ -f "$DIR/settings.gradle" ] || \
-                 [ -f "$DIR/settings.gradle.kts" ]; }; then
-
+            if [ -f "$DIR/gradlew" ]; then
               ROOT="$DIR"
               break
             fi
@@ -89,30 +102,75 @@ jobs:
           )
 
           if [ -z "$ROOT" ]; then
-            echo "没有找到 Android 工程"
+            echo "ERROR: Android Gradle project not found."
+
+            echo ""
+            echo "gradlew files:"
+            find source \
+              -type f \
+              -name "gradlew" \
+              -print
+
+            echo ""
+            echo "settings files:"
+            find source \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -print
+
             exit 1
           fi
 
-          echo "Android 工程:"
+          echo "Android project root:"
           echo "$ROOT"
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
 
-      # 7. 设置 Gradle
+      # 7. 检查工程
+      - name: Check Android Project
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Project:"
+          pwd
+
+          echo ""
+          echo "Gradle:"
+          ./gradlew --version
+
+          echo ""
+          echo "Project files:"
+          ls -la
+
+          if [ ! -f "app/build.gradle" ] && \
+             [ ! -f "app/build.gradle.kts" ]; then
+            echo "ERROR: app module not found."
+            exit 1
+          fi
+
+      # 8. Gradle 权限
       - name: Prepare Gradle
         working-directory: ${{ steps.project.outputs.root }}
         run: |
           chmod +x gradlew
 
-      # 8. 构建 APK
+      # 9. 构建 Debug APK
       - name: Build APK
         working-directory: ${{ steps.project.outputs.root }}
         env:
           GRADLE_OPTS: "-Xmx4096m"
         run: |
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace
 
-      # 9. 上传 APK
+      # 10. 上传 APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
