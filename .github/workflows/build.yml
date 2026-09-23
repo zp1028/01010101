@@ -1,902 +1,122 @@
-name: Smart Trader V2 - Build
+name: Build APK From ZIP
 
 on:
-  push:
-    branches:
-      - main
-      - master
-      - develop
-
-  pull_request:
-    branches:
-      - main
-      - master
-      - develop
-
   workflow_dispatch:
-    inputs:
-      gradle_task:
-        description: "Gradle task"
-        required: true
-        default: ":app:assembleDebug :app:assembleRelease"
-        type: string
-
-      run_smoke:
-        description: "Run Python and architecture smoke test"
-        required: true
-        default: true
-        type: boolean
-
-      clean_build:
-        description: "Run Gradle clean"
-        required: true
-        default: true
-        type: boolean
-
-permissions:
-  contents: read
-
-env:
-  JAVA_VERSION: "17"
-  PYTHON_VERSION: "3.12"
-  ANDROID_API_LEVEL: "34"
-  BUILD_TOOLS_VERSION: "34.0.0"
-  GRADLE_OPTS: >-
-    -Dorg.gradle.jvmargs=-Xmx4096m
-    -XX:MaxMetaspaceSize=1024m
-    -Dfile.encoding=UTF-8
 
 jobs:
-
-  # ============================================================
-  # 1. ZIP 优先 / 源码备用
-  # ============================================================
-
-  prepare-source:
-    name: Prepare Source
-    runs-on: ubuntu-latest
-
-    outputs:
-      project_root: ${{ steps.locate.outputs.project_root }}
-      source_mode: ${{ steps.mode.outputs.source_mode }}
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Show repository
-        shell: bash
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "Repository"
-          echo "======================================"
-
-          find . \
-            -maxdepth 4 \
-            -type f \
-            -not -path "./.git/*" \
-            | sort \
-            | head -500
-
-      # --------------------------------------------------------
-      # 查找 ZIP
-      # --------------------------------------------------------
-
-      - name: Find source ZIP
-        id: find_zip
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE=""
-
-          # 优先固定名称
-          for FILE in \
-            "./Smart-Trader-V2.zip" \
-            "./smart-trader-v2.zip" \
-            "./source.zip" \
-            "./project.zip" \
-            "./android.zip"
-          do
-            if [ -f "$FILE" ]; then
-              ZIP_FILE="$FILE"
-              break
-            fi
-          done
-
-          # 没有固定名称时自动搜索
-          if [ -z "$ZIP_FILE" ]; then
-            ZIP_FILE="$(
-              find . \
-                -type f \
-                -iname "*.zip" \
-                -not -path "./.git/*" \
-                -not -path "./build_source/*" \
-                | sort \
-                | head -1
-            )"
-          fi
-
-          if [ -n "$ZIP_FILE" ]; then
-            echo "ZIP FOUND:"
-            echo "$ZIP_FILE"
-            echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-          else
-            echo "NO ZIP FOUND"
-            echo "zip_file=" >> "$GITHUB_OUTPUT"
-          fi
-
-      # --------------------------------------------------------
-      # ZIP 优先
-      # --------------------------------------------------------
-
-      - name: Extract ZIP source
-        if: steps.find_zip.outputs.zip_file != ''
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE="${{ steps.find_zip.outputs.zip_file }}"
-
-          echo "======================================"
-          echo "ZIP SOURCE MODE"
-          echo "======================================"
-
-          echo "Source:"
-          echo "$ZIP_FILE"
-
-          rm -rf build_source
-          mkdir -p build_source
-
-          echo "Testing ZIP..."
-
-          unzip -t "$ZIP_FILE"
-
-          echo "Extracting..."
-
-          unzip -q "$ZIP_FILE" -d build_source
-
-          echo "Extraction complete."
-
-          echo "===== Extracted files ====="
-
-          find build_source \
-            -maxdepth 6 \
-            -type f \
-            | sort \
-            | head -500
-
-      - name: Select source mode
-        id: mode
-        shell: bash
-        run: |
-          set -e
-
-          if [ -n "${{ steps.find_zip.outputs.zip_file }}" ]; then
-
-            echo "source_mode=ZIP" >> "$GITHUB_OUTPUT"
-
-            echo "======================================"
-            echo "SOURCE MODE: ZIP"
-            echo "======================================"
-
-          else
-
-            echo "source_mode=REPOSITORY" >> "$GITHUB_OUTPUT"
-
-            echo "======================================"
-            echo "SOURCE MODE: REPOSITORY"
-            echo "======================================"
-
-          fi
-
-      # --------------------------------------------------------
-      # 自动寻找 Android 根目录
-      # --------------------------------------------------------
-
-      - name: Locate Android project
-        id: locate
-        shell: bash
-        run: |
-          set -e
-
-          if [ -n "${{ steps.find_zip.outputs.zip_file }}" ]; then
-            SEARCH_ROOT="./build_source"
-          else
-            SEARCH_ROOT="."
-          fi
-
-          echo "======================================"
-          echo "Searching Android project"
-          echo "======================================"
-
-          echo "SEARCH_ROOT=$SEARCH_ROOT"
-
-          BEST_ROOT=""
-          BEST_SCORE=-1
-
-          while IFS= read -r SETTINGS; do
-
-            DIR="$(dirname "$SETTINGS")"
-
-            SCORE=0
-
-            if [ -f "$DIR/gradlew" ]; then
-              SCORE=$((SCORE + 40))
-            fi
-
-            if [ -f "$DIR/settings.gradle" ] || \
-               [ -f "$DIR/settings.gradle.kts" ]; then
-              SCORE=$((SCORE + 50))
-            fi
-
-            if [ -f "$DIR/build.gradle" ] || \
-               [ -f "$DIR/build.gradle.kts" ]; then
-              SCORE=$((SCORE + 20))
-            fi
-
-            if [ -d "$DIR/app" ]; then
-              SCORE=$((SCORE + 30))
-            fi
-
-            if [ -f "$DIR/app/src/main/AndroidManifest.xml" ]; then
-              SCORE=$((SCORE + 30))
-            fi
-
-            echo "Candidate:"
-            echo "  $DIR"
-            echo "Score:"
-            echo "  $SCORE"
-            echo
-
-            if [ "$SCORE" -gt "$BEST_SCORE" ]; then
-              BEST_ROOT="$DIR"
-              BEST_SCORE="$SCORE"
-            fi
-
-          done < <(
-            find "$SEARCH_ROOT" \
-              -type f \
-              \( \
-                -name "settings.gradle" \
-                -o \
-                -name "settings.gradle.kts" \
-              \) \
-              -not -path "*/.git/*" \
-              -not -path "*/.gradle/*" \
-              -not -path "*/build/*"
-          )
-
-          if [ -z "$BEST_ROOT" ]; then
-
-            echo "::error::Android project root not found."
-
-            echo "===== Directory diagnostic ====="
-
-            find "$SEARCH_ROOT" \
-              -maxdepth 7 \
-              -type f \
-              | sort \
-              | head -1000
-
-            exit 1
-          fi
-
-          BEST_ROOT="${BEST_ROOT#./}"
-
-          if [ -z "$BEST_ROOT" ]; then
-            BEST_ROOT="."
-          fi
-
-          echo "======================================"
-          echo "SELECTED PROJECT"
-          echo "======================================"
-
-          echo "Root : $BEST_ROOT"
-          echo "Score: $BEST_SCORE"
-
-          echo "project_root=$BEST_ROOT" >> "$GITHUB_OUTPUT"
-
-      # --------------------------------------------------------
-      # ZIP 模式必须严格验证
-      # --------------------------------------------------------
-
-      - name: Verify selected Android project
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="${{ steps.locate.outputs.project_root }}"
-
-          echo "Selected root:"
-          echo "$ROOT"
-
-          if [ ! -f "$ROOT/settings.gradle" ] && \
-             [ ! -f "$ROOT/settings.gradle.kts" ]; then
-
-            echo "::error::settings.gradle/settings.gradle.kts not found."
-
-            exit 1
-          fi
-
-          if [ ! -f "$ROOT/gradlew" ]; then
-
-            echo "::error::gradlew not found."
-
-            exit 1
-          fi
-
-          if [ ! -d "$ROOT/app" ]; then
-
-            echo "::error::app directory not found."
-
-            exit 1
-          fi
-
-          if [ ! -f "$ROOT/app/src/main/AndroidManifest.xml" ]; then
-
-            echo "::error::AndroidManifest.xml not found."
-
-            exit 1
-          fi
-
-          echo "ANDROID_PROJECT_OK"
-
-      # --------------------------------------------------------
-      # 保存准备阶段诊断
-      # --------------------------------------------------------
-
-      - name: Save source diagnostics
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p build/source-diagnostics
-
-          {
-            echo "SOURCE_MODE=${{ steps.mode.outputs.source_mode }}"
-            echo "ZIP=${{ steps.find_zip.outputs.zip_file }}"
-            echo "PROJECT_ROOT=${{ steps.locate.outputs.project_root }}"
-            echo
-            echo "===== PROJECT FILES ====="
-
-            find . \
-              -maxdepth 7 \
-              -type f \
-              -not -path "./.git/*" \
-              | sort \
-              | head -1000
-
-          } > build/source-diagnostics/source-info.txt
-
-      - name: Upload source diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smart-trader-v2-source-diagnostics-${{ github.run_number }}
-          if-no-files-found: warn
-          retention-days: 14
-          path: |
-            build/source-diagnostics/**
-            build_source/**
-
-
-  # ============================================================
-  # 2. Python / V2 Smoke Test
-  # ============================================================
-
-  smoke-test:
-    name: V2 Smoke Test
-    needs: prepare-source
-    runs-on: ubuntu-latest
-
-    if: |
-      github.event_name != 'workflow_dispatch' ||
-      inputs.run_smoke == true
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download prepared source
-        uses: actions/download-artifact@v4
-        with:
-          name: smart-trader-v2-source-diagnostics-${{ github.run_number }}
-          path: prepared-source
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Locate source again
-        shell: bash
-        run: |
-          set -e
-
-          echo "Project root from prepare step:"
-          echo "${{ needs.prepare-source.outputs.project_root }}"
-
-          echo "Source mode:"
-          echo "${{ needs.prepare-source.outputs.source_mode }}"
-
-      - name: Python compile check
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="${{ needs.prepare-source.outputs.project_root }}"
-
-          if [ "${{ needs.prepare-source.outputs.source_mode }}" = "ZIP" ]; then
-            ROOT="build_source/${ROOT#build_source/}"
-          fi
-
-          echo "Checking Python source..."
-
-          if [ -d "$ROOT/app/src/main/python" ]; then
-
-            python -m compileall -q \
-              "$ROOT/app/src/main/python"
-
-            echo "PY_COMPILE_OK"
-
-          elif [ -d "$ROOT/app" ]; then
-
-            python -m compileall -q \
-              "$ROOT/app"
-
-            echo "PY_COMPILE_OK"
-
-          else
-
-            echo "No Python application directory."
-
-          fi
-
-      - name: V2 architecture smoke scan
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="${{ needs.prepare-source.outputs.project_root }}"
-
-          echo "ROOT=$ROOT"
-
-          PY_FILES=$(find "$ROOT" \
-            -type f \
-            -name "*.py" \
-            -not -path "*/.gradle/*" \
-            -not -path "*/build/*" \
-            | wc -l || true)
-
-          KT_FILES=$(find "$ROOT" \
-            -type f \
-            -name "*.kt" \
-            -not -path "*/build/*" \
-            | wc -l || true)
-
-          echo "Python files: $PY_FILES"
-          echo "Kotlin files: $KT_FILES"
-
-          echo "SMOKE_OK"
-
-
-  # ============================================================
-  # 3. Android Build
-  # ============================================================
-
-  android-build:
-    name: Android APK Build
-    needs:
-      - prepare-source
-      - smoke-test
-
-    if: |
-      always() &&
-      needs.prepare-source.result == 'success' &&
-      (
-        needs.smoke-test.result == 'success' ||
-        needs.smoke-test.result == 'skipped'
-      )
-
+  build:
     runs-on: ubuntu-latest
 
     steps:
-
-      - name: Checkout repository
+      # 1. 拉取仓库
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # --------------------------------------------------------
-      # 如果是 ZIP 模式，重新解压
-      # --------------------------------------------------------
-
-      - name: Prepare ZIP source
-        if: needs.prepare-source.outputs.source_mode == 'ZIP'
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE="$(
-            find . \
-              -type f \
-              -iname "*.zip" \
-              -not -path "./.git/*" \
-              | sort \
-              | head -1
-          )"
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "::error::ZIP source disappeared."
-            exit 1
-          fi
-
-          rm -rf build_source
-          mkdir -p build_source
-
-          unzip -q "$ZIP_FILE" -d build_source
-
-          echo "ZIP extracted again for build."
-
-      # --------------------------------------------------------
-      # JDK 17
-      # --------------------------------------------------------
-
+      # 2. JDK 17
       - name: Setup JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # --------------------------------------------------------
-      # Python
-      # --------------------------------------------------------
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      # --------------------------------------------------------
-      # Android SDK
-      # --------------------------------------------------------
-
+      # 3. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK
-        shell: bash
         run: |
-          set -e
-
-          yes | sdkmanager --licenses >/dev/null || true
-
+          yes | sdkmanager --licenses || true
           sdkmanager \
             "platform-tools" \
-            "platforms;android-${ANDROID_API_LEVEL}" \
-            "build-tools;${BUILD_TOOLS_VERSION}"
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
-      # --------------------------------------------------------
-      # Project root
-      # --------------------------------------------------------
-
-      - name: Resolve project root
-        id: root
-        shell: bash
+      # 4. 找到 ZIP
+      - name: Find ZIP
+        id: find_zip
         run: |
-          set -e
+          ZIP=$(find . \
+            -type f \
+            -iname "*.zip" \
+            -not -path "./.git/*" \
+            | head -1)
 
-          ROOT="${{ needs.prepare-source.outputs.project_root }}"
-
-          if [ "${{ needs.prepare-source.outputs.source_mode }}" = "ZIP" ]; then
-
-            if [[ "$ROOT" != build_source/* ]]; then
-              ROOT="build_source/$ROOT"
-            fi
-
-          fi
-
-          echo "ROOT=$ROOT"
-
-          if [ ! -f "$ROOT/gradlew" ]; then
-            echo "::error::gradlew not found at $ROOT"
+          if [ -z "$ZIP" ]; then
+            echo "没有找到 ZIP 文件"
             exit 1
           fi
 
-          echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "找到 ZIP:"
+          echo "$ZIP"
 
-      - name: Make Gradle executable
-        working-directory: ${{ steps.root.outputs.project_root }}
-        shell: bash
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      # 5. 自动解压
+      - name: Extract ZIP
         run: |
-          chmod +x ./gradlew
+          rm -rf source
+          mkdir -p source
 
-      # --------------------------------------------------------
-      # Diagnostics
-      # --------------------------------------------------------
+          unzip -q "${{ steps.find_zip.outputs.zip }}" -d source
 
-      - name: Environment diagnostics
-        working-directory: ${{ steps.root.outputs.project_root }}
-        shell: bash
+          echo "解压完成"
+          find source -maxdepth 4 -type f | head -200
+
+      # 6. 自动寻找 Android 工程
+      - name: Find Android Project
+        id: project
         run: |
-          mkdir -p build/ci-diagnostics
-
-          {
-            echo "===== JAVA ====="
-            java -version
-
-            echo
-            echo "===== PYTHON ====="
-            python --version
-
-            echo
-            echo "===== GRADLE ====="
-            ./gradlew --version
-
-            echo
-            echo "===== PROJECT ====="
-            pwd
-
-            echo
-            echo "===== SETTINGS ====="
-            cat settings.gradle 2>/dev/null || \
-              cat settings.gradle.kts 2>/dev/null || true
-
-          } > build/ci-diagnostics/environment.txt
-
-          cat build/ci-diagnostics/environment.txt
-
-      # --------------------------------------------------------
-      # Gradle cache
-      # --------------------------------------------------------
-
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-
-          key: smart-trader-v2-gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-
-          restore-keys: |
-            smart-trader-v2-gradle-${{ runner.os }}-
-
-      # --------------------------------------------------------
-      # Clean
-      # --------------------------------------------------------
-
-      - name: Gradle clean
-        if: |
-          github.event_name != 'workflow_dispatch' ||
-          inputs.clean_build == true
-
-        working-directory: ${{ steps.root.outputs.project_root }}
-
-        shell: bash
-
-        run: |
-          ./gradlew clean \
-            --no-daemon \
-            --stacktrace
-
-      # --------------------------------------------------------
-      # Build APK
-      # --------------------------------------------------------
-
-      - name: Build Debug and Release
-        working-directory: ${{ steps.root.outputs.project_root }}
-
-        shell: bash
-
-        env:
-          GRADLE_OPTS: >-
-            -Dorg.gradle.jvmargs=-Xmx4096m
-            -XX:MaxMetaspaceSize=1024m
-            -Dfile.encoding=UTF-8
-
-        run: |
-          set -o pipefail
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TASK="${{ inputs.gradle_task }}"
-          else
-            TASK=":app:assembleDebug :app:assembleRelease"
-          fi
-
-          echo "======================================"
-          echo "Gradle Build"
-          echo "======================================"
-
-          echo "TASK=$TASK"
-
-          ./gradlew \
-            $TASK \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            2>&1 | tee build/gradle-build.log
-
-      # --------------------------------------------------------
-      # APK inspection
-      # --------------------------------------------------------
-
-      - name: Inspect APK
-        if: always()
-        working-directory: ${{ steps.root.outputs.project_root }}
-        shell: bash
-        run: |
-          mkdir -p build/ci-diagnostics
-
-          find app/build/outputs \
-            -type f \
-            \( \
-              -name "*.apk" \
-              -o \
-              -name "*.aab" \
-            \) \
-            -print \
-            > build/ci-diagnostics/apk-files.txt \
-            || true
-
-          echo "===== APK FILES ====="
-
-          cat build/ci-diagnostics/apk-files.txt || true
-
-          echo
-          echo "===== APK SIZES ====="
+          ROOT=""
 
           while IFS= read -r FILE; do
-            if [ -f "$FILE" ]; then
-              ls -lh "$FILE"
-            fi
-          done < build/ci-diagnostics/apk-files.txt
+            DIR=$(dirname "$FILE")
 
-      # --------------------------------------------------------
-      # SHA256
-      # --------------------------------------------------------
+            if [ -f "$DIR/gradlew" ] && \
+               { [ -f "$DIR/settings.gradle" ] || \
+                 [ -f "$DIR/settings.gradle.kts" ]; }; then
 
-      - name: Generate SHA256
-        if: always()
-        working-directory: ${{ steps.root.outputs.project_root }}
-        shell: bash
-        run: |
-          mkdir -p build/ci-diagnostics
-
-          SHA_FILE="build/ci-diagnostics/apk-sha256.txt"
-
-          echo "Smart Trader V2 APK SHA256" > "$SHA_FILE"
-          echo "====================================" >> "$SHA_FILE"
-
-          while IFS= read -r FILE; do
-            if [ -f "$FILE" ]; then
-              sha256sum "$FILE" >> "$SHA_FILE"
+              ROOT="$DIR"
+              break
             fi
           done < <(
-            find app/build/outputs \
+            find source \
               -type f \
               \( \
-                -name "*.apk" \
+                -name "settings.gradle" \
                 -o \
-                -name "*.aab" \
-              \) \
-              2>/dev/null
+                -name "settings.gradle.kts" \
+              \)
           )
 
-          cat "$SHA_FILE"
-
-      # --------------------------------------------------------
-      # Build reports
-      # --------------------------------------------------------
-
-      - name: Collect Gradle reports
-        if: always()
-        working-directory: ${{ steps.root.outputs.project_root }}
-        shell: bash
-        run: |
-          mkdir -p build/ci-diagnostics
-
-          if [ -d "app/build/reports" ]; then
-            cp -R \
-              app/build/reports \
-              build/ci-diagnostics/ \
-              || true
-          fi
-
-          if [ -d "app/build/outputs/logs" ]; then
-            cp -R \
-              app/build/outputs/logs \
-              build/ci-diagnostics/ \
-              || true
-          fi
-
-      # --------------------------------------------------------
-      # APK Artifact
-      # --------------------------------------------------------
-
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Smart-Trader-V2-APK-${{ github.run_number }}
-          if-no-files-found: error
-          retention-days: 30
-
-          path: |
-            ${{ steps.root.outputs.project_root }}/app/build/outputs/apk/**/*.apk
-
-      # --------------------------------------------------------
-      # Diagnostics Artifact
-      # --------------------------------------------------------
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Smart-Trader-V2-Diagnostics-${{ github.run_number }}
-          if-no-files-found: warn
-          retention-days: 30
-
-          path: |
-            ${{ steps.root.outputs.project_root }}/build/gradle-build.log
-            ${{ steps.root.outputs.project_root }}/build/ci-diagnostics/**
-            ${{ steps.root.outputs.project_root }}/app/build/reports/**
-            ${{ steps.root.outputs.project_root }}/app/build/outputs/logs/**
-
-
-  # ============================================================
-  # 4. Final Summary
-  # ============================================================
-
-  build-summary:
-    name: Final Build Summary
-    needs:
-      - prepare-source
-      - smoke-test
-      - android-build
-
-    if: always()
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Print summary
-        shell: bash
-        run: |
-          echo "=============================================="
-          echo "       SMART TRADER V2 BUILD SUMMARY"
-          echo "=============================================="
-
-          echo
-          echo "Source mode:"
-          echo "${{ needs.prepare-source.outputs.source_mode }}"
-
-          echo
-          echo "Project root:"
-          echo "${{ needs.prepare-source.outputs.project_root }}"
-
-          echo
-          echo "Prepare source:"
-          echo "${{ needs.prepare-source.result }}"
-
-          echo
-          echo "Smoke test:"
-          echo "${{ needs.smoke-test.result }}"
-
-          echo
-          echo "Android build:"
-          echo "${{ needs.android-build.result }}"
-
-          echo
-          echo "=============================================="
-
-          if [ "${{ needs.android-build.result }}" = "success" ]; then
-            echo "BUILD_RESULT=SUCCESS"
-          else
-            echo "BUILD_RESULT=FAILED"
-            echo "Check Smart-Trader-V2-Diagnostics artifact."
+          if [ -z "$ROOT" ]; then
+            echo "没有找到 Android 工程"
             exit 1
           fi
+
+          echo "Android 工程:"
+          echo "$ROOT"
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      # 7. 设置 Gradle
+      - name: Prepare Gradle
+        working-directory: ${{ steps.project.outputs.root }}
+        run: |
+          chmod +x gradlew
+
+      # 8. 构建 APK
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.root }}
+        env:
+          GRADLE_OPTS: "-Xmx4096m"
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      # 9. 上传 APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Smart-Trader-V2-APK
+          path: |
+            ${{ steps.project.outputs.root }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
