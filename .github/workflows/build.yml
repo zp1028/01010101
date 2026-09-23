@@ -1,10 +1,4 @@
-# Smart Trader — 定制 CI（匹配本仓库 android/ 结构）
-# 路径约定：
-#   android/gradlew
-#   android/gradle/wrapper/gradle-wrapper.jar
-#   android/app/build.gradle.kts
-# compileSdk 35 / JDK 17 / Gradle 8.9
-name: Build APK
+name: 解压并构建APK
 
 on:
   push:
@@ -12,117 +6,76 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: assembleDebug
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Unpack source ZIP if needed
+      - name: 解压 ZIP
         run: |
           set -e
-          # 已有标准目录则跳过
-          if [ -f android/gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "Found android/ in repo — skip unzip"
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "仓库根目录没有 zip，跳过解压"
             exit 0
           fi
-          # 扫描常见 zip 名
-          ZIP=""
-          for c in \
-            Smart-Trader-APK-ready.zip \
-            Smart-Trader-v1.0.2-source.zip \
-            source.zip \
-            app-source.zip; do
-            if [ -f "$c" ]; then ZIP="$c"; break; fi
-          done
-          if [ -z "$ZIP" ]; then
-            ZIP=$(ls -1 ./*.zip 2>/dev/null | head -1 || true)
-          fi
-          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-            echo "ERROR: no android/ and no zip to extract"
-            ls -la
-            exit 1
-          fi
-          echo "Extracting $ZIP"
+          echo "解压: $ZIP"
           mkdir -p _src
           unzip -q -o "$ZIP" -d _src
-          # 把解压出的 android/ 提到仓库根（若嵌套一层）
-          if [ -d _src/android ]; then
-            rm -rf android
-            mv _src/android android
-          elif [ -f _src/gradle/wrapper/gradle-wrapper.jar ]; then
-            rm -rf android
-            mkdir -p android
-            mv _src/* android/ 2>/dev/null || true
-          else
-            # 更深一层
-            INNER=$(find _src -type d -name android 2>/dev/null | head -1)
-            if [ -n "$INNER" ] && [ -f "$INNER/gradle/wrapper/gradle-wrapper.jar" ]; then
-              rm -rf android
-              mv "$INNER" android
-            else
-              echo "ERROR: cannot find android project inside zip"
-              find _src -name "gradle-wrapper.jar" -o -name "build.gradle.kts" | head -20
-              exit 1
-            fi
-          fi
-          test -f android/gradle/wrapper/gradle-wrapper.jar
-          echo "android/ ready"
 
-      - name: Write local.properties + accept SDK licenses
+      - name: 定位 Android 项目根目录
+        run: |
+          set -e
+          FOUND=""
+          if [ -f _src/SmartTraderApp/build.gradle ]; then
+            FOUND="_src/SmartTraderApp"
+          elif [ -f _src/build.gradle ]; then
+            FOUND="_src"
+          else
+            FOUND=$(find _src -name "build.gradle" -not -path "*/app/*" -type f 2>/dev/null | head -1 | xargs -r dirname)
+          fi
+          if [ -z "$FOUND" ] || [ ! -d "$FOUND" ]; then
+            echo "ERROR: 找不到 Android 项目根目录"
+            echo "=== _src 目录结构 ==="
+            find _src -maxdepth 3 -name "*.gradle" | head -30
+            exit 1
+          fi
+          FOUND=$(cd "$FOUND" && pwd)
+          echo "PROJECT_ROOT=$FOUND"
+          echo "dir=$FOUND" >> "$GITHUB_ENV"
+          echo "项目根目录: $FOUND"
+
+      - name: 准备 Android SDK
         run: |
           set -e
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          echo "SDK=$SDK"
           mkdir -p "$SDK/licenses"
           printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
           printf '84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
-          printf 'sdk.dir=%s\n' "$SDK" > android/local.properties
-          cat android/local.properties
-          # 安装 platform 35（失败不阻断，runner 常已预装）
-          if [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" \
-              "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
-          fi
+          printf 'sdk.dir=%s\n' "$SDK" > "$dir/local.properties"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          cat "$dir/local.properties"
 
-      - name: Show project tree
-        run: |
-          ls -la android/
-          ls -la android/gradle/wrapper/
-          ls -la android/app/
-          test -f android/settings.gradle.kts
-          test -f android/app/build.gradle.kts
-          test -f android/gradle/wrapper/gradle-wrapper.jar
-          test -f android/gradle/wrapper/gradle-wrapper.properties
+      - name: 安装 Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-      - name: Build Debug APK
-        working-directory: android
-        env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false
-        run: |
-          set -e
-          # 直接调 WrapperMain，避开 shell 脚本兼容问题
-          java -Xmx2g -Xms256m \
-            -classpath gradle/wrapper/gradle-wrapper.jar \
-            org.gradle.wrapper.GradleWrapperMain \
-            assembleDebug --stacktrace --no-daemon
+      - name: 构建 Debug APK
+        working-directory: ${{ env.dir }}
+        run: gradle assembleDebug --stacktrace --no-daemon
 
-      - name: List APK outputs
-        run: find android/app/build/outputs -type f -name "*.apk" -ls || true
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: smart-trader-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: smart-trader-apk
+          path: "**/app/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
