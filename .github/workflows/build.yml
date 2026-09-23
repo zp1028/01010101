@@ -1,102 +1,236 @@
-name: 解压并构建APK
+# ============================================================
+  # 1. Automatically extract source ZIP and locate Android root
+  # ============================================================
 
-on:
-  push:
-    branches: [main, master]
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  build:
+  prepare-source:
+    name: Extract Source ZIP and Locate Android Project
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+
+    outputs:
+      project_root: ${{ steps.locate.outputs.project_root }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 解压 ZIP
+      - name: Show repository files
+        shell: bash
+        run: |
+          echo "===== Repository ====="
+          find . -maxdepth 3 -type f | sort | head -300
+
+      - name: Find source ZIP
+        id: zip
+        shell: bash
         run: |
           set -e
-          ZIP=$(ls -1 *.zip 2>/dev/null | head -1 || true)
-          if [ -z "$ZIP" ]; then
-            echo "仓库根目录没有 zip，跳过"
-            exit 0
+
+          mkdir -p build_source
+
+          ZIP_FILE=""
+
+          # 优先寻找常见源码 ZIP
+          for FILE in \
+            ./source.zip \
+            ./project.zip \
+            ./android.zip \
+            ./Smart-Trader-V2.zip
+          do
+            if [ -f "$FILE" ]; then
+              ZIP_FILE="$FILE"
+              break
+            fi
+          done
+
+          # 如果没有固定名称，则自动寻找 ZIP
+          if [ -z "$ZIP_FILE" ]; then
+            ZIP_FILE=$(find . \
+              -maxdepth 3 \
+              -type f \
+              -iname "*.zip" \
+              -not -path "./.git/*" \
+              | head -1 || true)
           fi
-          echo "解压: $ZIP"
-          mkdir -p _src
-          unzip -q -o "$ZIP" -d _src
 
-      - name: 定位项目
-        run: |
-          set -e
-          FOUND=""
-          if [ -f _src/SmartTraderApp/build.gradle ]; then
-            FOUND="_src/SmartTraderApp"
-          elif [ -f _src/build.gradle ]; then
-            FOUND="_src"
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found source ZIP:"
+            echo "$ZIP_FILE"
+
+            echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           else
-            FOUND=$(find _src -name "build.gradle" -not -path "*/app/*" -type f 2>/dev/null | head -1 | xargs -r dirname)
+            echo "No source ZIP found."
+            echo "zip_file=" >> "$GITHUB_OUTPUT"
           fi
-          if [ -z "$FOUND" ] || [ ! -d "$FOUND" ]; then
-            echo "找不到项目根目录"
-            find _src -maxdepth 3 -name "*.gradle" | head -30
+
+      - name: Extract source ZIP
+        if: steps.zip.outputs.zip_file != ''
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE="${{ steps.zip.outputs.zip_file }}"
+
+          echo "Extracting:"
+          echo "$ZIP_FILE"
+
+          rm -rf build_source
+          mkdir -p build_source
+
+          unzip -q "$ZIP_FILE" -d build_source
+
+          echo "===== Extracted files ====="
+          find build_source \
+            -maxdepth 5 \
+            -type f \
+            | sort \
+            | head -500
+
+      - name: Select source workspace
+        shell: bash
+        run: |
+          set -e
+
+          # 如果存在 ZIP，优先使用解压内容
+          if [ -d "build_source" ] && [ "$(find build_source -type f | wc -l)" -gt 0 ]; then
+            echo "Using extracted source."
+
+            # 让后续步骤可以直接使用 build_source
+            touch build_source/.source_workspace
+          else
+            echo "No extracted source."
+            echo "Using repository source directly."
+          fi
+
+      - name: Locate Android project root
+        id: locate
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Searching Android project root"
+          echo "======================================"
+
+          SEARCH_ROOT="."
+
+          if [ -f "build_source/.source_workspace" ]; then
+            SEARCH_ROOT="./build_source"
+          fi
+
+          ROOT=""
+          BEST_SCORE=-1
+
+          while IFS= read -r SETTINGS; do
+
+            DIR="$(dirname "$SETTINGS")"
+
+            SCORE=0
+
+            if [ -f "$DIR/gradlew" ]; then
+              SCORE=$((SCORE + 30))
+            fi
+
+            if [ -f "$DIR/settings.gradle" ] || \
+               [ -f "$DIR/settings.gradle.kts" ]; then
+              SCORE=$((SCORE + 50))
+            fi
+
+            if [ -f "$DIR/build.gradle" ] || \
+               [ -f "$DIR/build.gradle.kts" ]; then
+              SCORE=$((SCORE + 20))
+            fi
+
+            if [ -d "$DIR/app" ]; then
+              SCORE=$((SCORE + 30))
+            fi
+
+            if [ -f "$DIR/app/src/main/AndroidManifest.xml" ]; then
+              SCORE=$((SCORE + 30))
+            fi
+
+            echo "Candidate: $DIR"
+            echo "Score: $SCORE"
+            echo
+
+            if [ "$SCORE" -gt "$BEST_SCORE" ]; then
+              ROOT="$DIR"
+              BEST_SCORE="$SCORE"
+            fi
+
+          done < <(
+            find "$SEARCH_ROOT" \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -not -path "*/.gradle/*" \
+              -not -path "*/build/*"
+          )
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::Android project root not found."
+            echo
+            echo "Repository structure:"
+            find "$SEARCH_ROOT" \
+              -maxdepth 5 \
+              -type f \
+              | sort \
+              | head -500
             exit 1
           fi
-          FOUND=$(cd "$FOUND" && pwd)
-          echo "dir=$FOUND" >> "$GITHUB_ENV"
-          echo "项目根目录: $FOUND"
 
-      - name: 准备 SDK
+          # 去掉 ./ 前缀
+          ROOT="${ROOT#./}"
+
+          if [ -z "$ROOT" ]; then
+            ROOT="."
+          fi
+
+          echo "======================================"
+          echo "Selected Android root:"
+          echo "$ROOT"
+          echo "Score:"
+          echo "$BEST_SCORE"
+          echo "======================================"
+
+          echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify selected project
+        shell: bash
         run: |
           set -e
-          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          mkdir -p "$SDK/licenses"
-          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
-          printf '84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
-          printf 'sdk.dir=%s\n' "$SDK" > "$dir/local.properties"
 
-      - uses: gradle/actions/setup-gradle@v3
+          ROOT="${{ steps.locate.outputs.project_root }}"
+
+          echo "Selected root:"
+          echo "$ROOT"
+
+          if [ ! -f "$ROOT/settings.gradle" ] && \
+             [ ! -f "$ROOT/settings.gradle.kts" ]; then
+            echo "::error::settings.gradle not found."
+            exit 1
+          fi
+
+          if [ ! -f "$ROOT/gradlew" ]; then
+            echo "::error::gradlew not found."
+            exit 1
+          fi
+
+          if [ ! -d "$ROOT/app" ]; then
+            echo "::error::app directory not found."
+            exit 1
+          fi
+
+          echo "ANDROID_PROJECT_OK"
+
+      - name: Upload extracted source diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          gradle-version: 8.9
-
-      - name: 构建
-        id: build
-        continue-on-error: true
-        working-directory: ${{ env.dir }}
-        run: |
-          gradle assembleDebug --stacktrace --no-daemon > /tmp/build.log 2>&1
-          echo "BUILD_EXIT=$?" >> $GITHUB_ENV
-
-      - name: 列出构建输出
-        run: |
-          echo "=== 查找 APK 文件 ==="
-          find ${{ env.dir }} -name "*.apk" -type f 2>/dev/null || echo "没找到 APK"
-          echo ""
-          echo "=== 构建输出目录 ==="
-          ls -la ${{ env.dir }}/app/build/outputs/ 2>/dev/null || echo "没有 outputs 目录"
-          echo ""
-          echo "=== 完整构建输出 ==="
-          cat /tmp/build.log | tail -50
-
-      - name: 真实错误提取
-        if: steps.build.outcome == 'failure'
-        run: |
-          echo "=========================================="
-          echo "❌ 构建失败"
-          echo "=========================================="
-          echo "=== 关键错误 ==="
-          grep -E "FAILURE:|What went wrong:|> |error:|Error:|Caused by:|Non-zero exit|Chaquopy:" /tmp/build.log | tail -20
-          echo "=========================================="
-          exit 1
-
-      - uses: actions/upload-artifact@v4
-        if: steps.build.outcome == 'success'
-        with:
-          name: smart-trader-apk
-          path: "**/app/build/outputs/apk/debug/*.apk"
+          name: smart-trader-v2-source-diagnostics-${{ github.run_number }}
           if-no-files-found: warn
+          retention-days: 7
+          path: |
+            build_source/
