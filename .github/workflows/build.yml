@@ -78,22 +78,45 @@ jobs:
         working-directory: ${{ env.dir }}
         run: gradle assembleDebug --stacktrace --no-daemon
 
-      - name: 报错反馈
+      - name: 失败反馈报告
         if: steps.build.outcome == 'failure'
         run: |
-          echo "=========================================="
-          echo "❌ 构建失败！以下是错误诊断："
-          echo "=========================================="
           echo ""
-          echo "常见原因排查："
-          echo "  1. Chaquopy 插件版本和 Gradle 不兼容"
-          echo "  2. Python 依赖编译失败（某个包不支持 arm）"
-          echo "  3. Android SDK 版本不对"
-          echo "  4. 项目路径找错了（没找到 build.gradle）"
+          echo "╔══════════════════════════════════════════╗"
+          echo "║       ❌ APK 构建失败 - 诊断报告        ║"
+          echo "╚══════════════════════════════════════════╝"
           echo ""
-          echo "=== 请查看上面 '构建 Debug APK' 步骤的完整日志 ==="
-          echo "=== 找带 FAILURE: 或 What went wrong: 的行 ==="
-          echo "=========================================="
+          echo "【错误位置】"
+          echo "  请往上翻找到 '构建 Debug APK' 步骤"
+          echo "  展开它，找带 FAILURE: 或 What went wrong: 的行"
+          echo ""
+          echo "【常见原因排查清单】"
+          echo ""
+          echo "  □ Chaquopy 插件版本和 Gradle 不兼容"
+          echo "    → 检查 Gradle 版本（当前锁定 8.9）"
+          echo ""
+          echo "  □ ndk.abiFilters 没配置"
+          echo "    → app/build.gradle 的 defaultConfig 里要有:"
+          echo "      ndk {"
+          echo "        abiFilters \"armeabi-v7a\", \"arm64-v8a\""
+          echo "      }"
+          echo ""
+          echo "  □ Python 依赖编译失败"
+          echo "    → 某个包不支持 arm 架构"
+          echo "    → 检查 chaquopy.pip 里的包版本"
+          echo ""
+          echo "  □ Android SDK 版本不对"
+          echo "    → compileSdk 34 需要 SDK Platform 34"
+          echo ""
+          echo "  □ 项目路径找错了"
+          echo "    → 没找到 build.gradle"
+          echo "    → 检查解压后的目录结构"
+          echo ""
+          echo "【下一步】"
+          echo "  1. 截图 '构建 Debug APK' 步骤的红色错误部分"
+          echo "  2. 发给我，我帮你定位具体问题"
+          echo ""
+          echo "╚══════════════════════════════════════════╝"
           exit 1
 
       - uses: actions/upload-artifact@v4
