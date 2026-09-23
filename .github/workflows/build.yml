@@ -69,12 +69,35 @@ jobs:
 
       - name: 安装 Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.9
 
       - name: 构建 Debug APK
+        id: build
+        continue-on-error: true
         working-directory: ${{ env.dir }}
         run: gradle assembleDebug --stacktrace --no-daemon
 
+      - name: 报错反馈
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "=========================================="
+          echo "❌ 构建失败！以下是错误诊断："
+          echo "=========================================="
+          echo ""
+          echo "常见原因排查："
+          echo "  1. Chaquopy 插件版本和 Gradle 不兼容"
+          echo "  2. Python 依赖编译失败（某个包不支持 arm）"
+          echo "  3. Android SDK 版本不对"
+          echo "  4. 项目路径找错了（没找到 build.gradle）"
+          echo ""
+          echo "=== 请查看上面 '构建 Debug APK' 步骤的完整日志 ==="
+          echo "=== 找带 FAILURE: 或 What went wrong: 的行 ==="
+          echo "=========================================="
+          exit 1
+
       - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
         with:
           name: smart-trader-apk
           path: "**/app/build/outputs/apk/debug/*.apk"
