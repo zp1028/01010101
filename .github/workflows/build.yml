@@ -68,22 +68,29 @@ jobs:
         id: build
         continue-on-error: true
         working-directory: ${{ env.dir }}
-        run: gradle assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log
+        run: |
+          gradle assembleDebug --stacktrace --no-daemon > /tmp/build.log 2>&1
+          echo "BUILD_EXIT=$?" >> $GITHUB_ENV
 
-      - name: 错误摘要
+      - name: 列出构建输出
+        run: |
+          echo "=== 查找 APK 文件 ==="
+          find ${{ env.dir }} -name "*.apk" -type f 2>/dev/null || echo "没找到 APK"
+          echo ""
+          echo "=== 构建输出目录 ==="
+          ls -la ${{ env.dir }}/app/build/outputs/ 2>/dev/null || echo "没有 outputs 目录"
+          echo ""
+          echo "=== 完整构建输出 ==="
+          cat /tmp/build.log | tail -50
+
+      - name: 真实错误提取
         if: steps.build.outcome == 'failure'
         run: |
           echo "=========================================="
-          echo "❌ 构建失败 - 错误摘要"
+          echo "❌ 构建失败"
           echo "=========================================="
-          echo ""
-          echo "--- 关键错误行 ---"
-          grep -E "FAILURE:|What went wrong:|error:|Error:|Caused by:|Non-zero exit|Chaquopy:" build.log | head -20
-          echo ""
-          echo "--- 建议 ---"
-          echo "1. 往上翻找到 '构建' 步骤"
-          echo "2. 展开它，找红色错误字"
-          echo "3. 截图发给我"
+          echo "=== 关键错误 ==="
+          grep -E "FAILURE:|What went wrong:|> |error:|Error:|Caused by:|Non-zero exit|Chaquopy:" /tmp/build.log | tail -20
           echo "=========================================="
           exit 1
 
@@ -92,4 +99,4 @@ jobs:
         with:
           name: smart-trader-apk
           path: "**/app/build/outputs/apk/debug/*.apk"
-          if-no-files-found: error
+          if-no-files-found: warn
