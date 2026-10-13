@@ -130,7 +130,31 @@ jobs:
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
 
-      # 7. 检查工程
+      # 7. 修复 gradlew 权限 + 换行 + local.properties
+      - name: Prepare Gradle
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -e
+
+          # 去除可能的 Windows 换行符
+          sed -i 's/\r$//' gradlew || true
+
+          # 赋予可执行权限
+          chmod +x gradlew
+
+          # 写入 local.properties，确保能找到 SDK
+          if [ ! -f "local.properties" ]; then
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+          fi
+
+          echo "gradlew permission:"
+          ls -l gradlew
+
+          echo "local.properties:"
+          cat local.properties || true
+
+      # 8. 检查工程（此时 gradlew 已有权限）
       - name: Check Android Project
         working-directory: ${{ steps.project.outputs.root }}
         shell: bash
@@ -154,17 +178,13 @@ jobs:
             exit 1
           fi
 
-      # 8. Gradle 权限
-      - name: Prepare Gradle
-        working-directory: ${{ steps.project.outputs.root }}
-        run: |
-          chmod +x gradlew
-
       # 9. 构建 Debug APK
       - name: Build APK
         working-directory: ${{ steps.project.outputs.root }}
         env:
           GRADLE_OPTS: "-Xmx4096m"
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           ./gradlew :app:assembleDebug \
             --no-daemon \
